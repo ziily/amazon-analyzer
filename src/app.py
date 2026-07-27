@@ -176,7 +176,7 @@ def aggregate_images(image_records):
     # ===== 缓存检查 =====
     url_str = "".join(sorted([r.get("image_url", "") for r in image_records]))
     cache_hash = hashlib.md5(url_str.encode()).hexdigest()[:12]
-    cache_dir = "../data/cache"
+    cache_dir = "data/cache"   # 已修正为相对路径，云上可用
     cache_file = os.path.join(cache_dir, f"image_cache_{cache_hash}.csv")
 
     if os.path.exists(cache_file):
@@ -698,7 +698,20 @@ if uploaded_file is not None:
         final_df, full_df = run_full_analysis(classified_data, max_items)
 
     st.subheader("📋 产品竞争力排名")
-    st.dataframe(final_df, width='stretch')
+    # ========== 修改：将 ASIN 列显示为链接 ==========
+    final_df_display = final_df.copy()
+    final_df_display['商品链接'] = final_df_display['asin'].apply(
+        lambda x: f'https://www.amazon.de/dp/{x}'
+    )
+    st.dataframe(
+        final_df_display,
+        column_config={
+            "商品链接": st.column_config.LinkColumn("商品详情页", display_text=r'^(https://www\.amazon\.de/dp/)(.*)'),
+            "asin": None,  # 隐藏原始ASIN列
+        },
+        width='stretch'
+    )
+    # ===============================================
 
     csv = final_df.to_csv(index=False, encoding="utf-8-sig")
     st.download_button("📥 下载结果 CSV", data=csv, file_name="product_competitiveness_final.csv", mime="text/csv")
@@ -759,5 +772,336 @@ if uploaded_file is not None:
             st.error(f"⚠️ 痛点维度：{', '.join(painpoints)}（低于平均20%以上）")
         else:
             st.info("暂无显著痛点")
+
+    # ==================== 新增：新品竞争力预测与优化建议 ====================
+    # ==================== 新品竞争力预测与优化建议（细化版 + 图片上传） ====================
+    st.subheader("📝 新品竞争力预测与优化建议")
+
+    with st.form("new_product_form"):
+        st.markdown("**填写你的产品信息（点击下方按钮后分析）**")
+        col1, col2 = st.columns(2)
+        with col1:
+            new_title = st.text_input("产品标题", placeholder="例如: Premium Bluetooth Headphones")
+            new_price = st.number_input("价格 (€)", min_value=0.0, step=0.01, value=29.99)
+            new_stars = st.number_input("星级评分 (1-5)", min_value=0.0, max_value=5.0, step=0.1, value=4.3)
+            new_reviews = st.number_input("评论数量", min_value=0, step=1, value=120)
+        with col2:
+            new_features = st.text_area("五点描述（每行一条）", placeholder="每条描述占一行", height=150)
+            has_aplus = st.checkbox("是否有 A+ 内容")
+            has_brandstory = st.checkbox("是否有品牌故事")
+            video_count = st.selectbox("视频数量", [0, 1, 2, 3, 5], index=0)
+
+        # 新增：图片上传（支持多张）
+        st.markdown("**上传产品图片（用于图片维度分析，最多5张）**")
+        uploaded_images = st.file_uploader(
+            "选择图片（支持 jpg/png）",
+            type=['jpg', 'jpeg', 'png'],
+            accept_multiple_files=True
+        )
+        if uploaded_images and len(uploaded_images) > 5:
+            st.warning("最多分析5张图片，已自动截取前5张")
+            uploaded_images = uploaded_images[:5]
+
+        submitted = st.form_submit_button("📊 分析新品竞争力", type="primary")
+
+    # ========== 只有当按钮被点击后才执行分析 ==========
+    if submitted:
+        if final_df.empty:
+            st.warning("当前没有可对比的数据集，请先上传 JSON 文件。")
+        else:
+            # 1. 获取分类器（用于心理评分）
+            classifier = load_zero_shot()
+
+            # ========= 2. 计算文本维度得分 =========
+            # 2a. 标题详细分析
+            title_psych = 0.0
+            if classifier is not None and new_title:
+                try:
+                    res = classifier(new_title, PSYCH_LABELS)
+                    scores = res['scores']
+                    max_score = max(scores)
+                    diversity = min(len([s for s in scores if s > 0.3]) / 3, 1.0)
+                    title_psych = (max_score * 0.7 + diversity * 0.3) * 100
+                except:
+                    pass
+            title_score_val = title_psych * 0.8 + min(len(new_title) / 100, 1.0) * 20 if new_title else 0
+            # 检查标题构成
+            has_num = any(c.isdigit() for c in new_title) if new_title else False
+            has_unit = any(
+                u in new_title.lower() for u in ['cm', 'mm', 'kg', 'g', 'ml', 'l', 'w', 'h']) if new_title else False
+            title_word_count = len(new_title.split()) if new_title else 0
+            if new_title:
+                title_score_val += (5 if has_num else 0) + (5 if has_unit else 0)
+            title_score_val = round(min(title_score_val, 100), 2)
+
+            # 2b. 价格得分
+            price_list = full_df['price_score'].dropna().tolist() if 'price_score' in full_df.columns else []
+            if price_list and new_price:
+                rank = sum(x > new_price for x in price_list)
+                price_score = round(rank / len(price_list) * 100, 2) if price_list else 50
+            else:
+                price_score = 50
+
+            # 2c. 信任得分
+            rating = new_stars / 5
+            review_norm = min(math.log(new_reviews + 1) / math.log(100000), 1) if new_reviews > 0 else 0
+            trust_score_val = round((rating * 0.6 + review_norm * 0.4) * 100, 2)
+
+            # 2d. 五点描述逐条分析（列表）
+            features_list = [f.strip() for f in new_features.split('\n') if f.strip()]
+            feat_scores = []
+            feat_details = []
+            if features_list and classifier:
+                temp_text2score = batch_psych_scores(features_list, classifier)
+                for idx, feat in enumerate(features_list):
+                    # 单条得分
+                    single_score = score_features_batch([feat], temp_text2score)
+                    # 简单规则：是否包含“you/your”（用户导向）
+                    has_user_mention = 'you' in feat.lower() or 'your' in feat.lower()
+                    # 是否提到对比或独特卖点
+                    has_differentiation = any(
+                        w in feat.lower() for w in ['unique', 'different', 'exclusive', 'only', 'best'])
+                    feat_scores.append(single_score)
+                    feat_details.append({
+                        'text': feat[:50] + '...' if len(feat) > 50 else feat,
+                        'score': single_score,
+                        'has_user_mention': has_user_mention,
+                        'has_differentiation': has_differentiation
+                    })
+                feat_avg = sum(feat_scores) / len(feat_scores) if feat_scores else 0
+            else:
+                feat_avg = 0
+                feat_details = []
+
+            # 2e. 图片分析（如果上传了图片）
+            img_scores = []
+            img_details = []
+            if uploaded_images:
+                # 加载CLIP模型
+                clip_model, clip_processor = load_clip()
+                for img_file in uploaded_images:
+                    try:
+                        img = Image.open(img_file).convert("RGB")
+                        # 调用analyze_image_with_clip需要URL，我们直接传入图片对象
+                        # 修改analyze_image_with_clip支持PIL Image直接传入（复制函数稍改）
+                        # 这里为了简化，我们直接调用底层CLIP
+                        inputs = clip_processor(text=TEXT_PROMPTS, images=img, return_tensors="pt", padding=True)
+                        with torch.no_grad():
+                            outputs = clip_model(**inputs)
+                        logits = outputs.logits_per_image[0]
+                        positive = logits[:-1]
+                        baseline = logits[-1]
+                        scores = torch.sigmoid(positive - baseline)
+                        result = {name: float(scores[i]) for i, name in enumerate(FEATURE_NAMES)}
+                        # 计算消费者得分（类似thumbnail/high_resolution，这里统一用高分辨率权重）
+                        consumer_score = calculate_consumer_score({
+                            'image_type': 'high_resolution',
+                            'attention': result.get('attention', 0),
+                            'product_understanding': result.get('product_understanding', 0),
+                            'quality_perception': result.get('quality_perception', 0),
+                            'differentiation': result.get('differentiation', 0),
+                            'value_perception': result.get('value_perception', 0),
+                            'usage_imagination': result.get('usage_imagination', 0),
+                            'risk_reduction': result.get('risk_reduction', 0),
+                            'trust_signal': result.get('trust_signal', 0)
+                        })
+                        img_scores.append(consumer_score)
+                        img_details.append({
+                            'name': img_file.name,
+                            'score': consumer_score,
+                            'trust': result.get('trust_signal', 0) * 100,
+                            'quality': result.get('quality_perception', 0) * 100,
+                            'value': result.get('value_perception', 0) * 100,
+                            'usage': result.get('usage_imagination', 0) * 100,
+                            'risk': result.get('risk_reduction', 0) * 100
+                        })
+                    except Exception as e:
+                        st.warning(f"图片 {img_file.name} 分析失败: {e}")
+                img_avg = np.mean(img_scores) if img_scores else 0
+            else:
+                img_avg = full_df['image_score'].mean() if 'image_score' in full_df.columns else 20.0
+                img_details = []
+
+            # 2f. 视频得分
+            vid_s = score_video(video_count)
+
+            # 2g. A+ 和品牌故事
+            aplus_score = 50 if has_aplus else 0
+            brand_bonus = 10 if has_brandstory else 0
+
+            # 2h. 属性等（取均值）
+            attr_s = full_df['attributes_score'].mean() if 'attributes_score' in full_df.columns else 50
+            imp_s = full_df['important_score'].mean() if 'important_score' in full_df.columns else 50
+
+            # 2i. 计算最终得分
+            weights = {"features": 0.30, "attributes": 0.25, "important": 0.05, "aplus": 0.10, "video": 0.05,
+                       "image": 0.25}
+            base = (feat_avg * weights["features"] + attr_s * weights["attributes"] +
+                    imp_s * weights["important"] + aplus_score * weights["aplus"] +
+                    vid_s * weights["video"] + img_avg * weights["image"])
+            listing_score = min(base + brand_bonus + trust_score_val * 0.1, 100)
+
+            avg_thumb = full_df['thumbnail_score'].mean() if 'thumbnail_score' in full_df.columns else 50
+            avg_position = full_df['position_score'].mean() if 'position_score' in full_df.columns else 50
+            search_score = (title_score_val * 0.25 + avg_thumb * 0.30 + price_score * 0.15 +
+                            trust_score_val * 0.20 + avg_position * 0.10)
+            search_score = round(search_score, 2)
+
+            conv_score = full_df['Conversion_Score'].mean() if 'Conversion_Score' in full_df.columns else 50
+            detail_conversion = 0.6 * listing_score + 0.4 * conv_score
+            total_score = 0.5 * search_score + 0.5 * detail_conversion
+
+            # ========= 3. 显示详细对比表格 =========
+            st.subheader("📊 新品 vs 数据集 细分得分对比")
+            new_product = pd.DataFrame({
+                '维度': ['标题得分', '价格得分', '信任得分', '五点描述得分', '图片得分', '视频得分', 'A+得分',
+                         '搜索得分', '详情得分', '转化得分', '综合总分'],
+                '新品得分': [title_score_val, price_score, trust_score_val, round(feat_avg, 2), round(img_avg, 2),
+                             vid_s, aplus_score, search_score, round(listing_score, 2), round(conv_score, 2),
+                             round(total_score, 2)]
+            })
+            avg_vals = {
+                '标题得分': full_df['title_score'].mean() if 'title_score' in full_df.columns else 50,
+                '价格得分': full_df['price_score'].mean() if 'price_score' in full_df.columns else 50,
+                '信任得分': full_df['trust_score'].mean() if 'trust_score' in full_df.columns else 50,
+                '五点描述得分': full_df['bullet_score'].mean() if 'bullet_score' in full_df.columns else 50,
+                '图片得分': full_df['image_score'].mean() if 'image_score' in full_df.columns else 50,
+                '视频得分': full_df['video_score'].mean() if 'video_score' in full_df.columns else 50,
+                'A+得分': full_df['aplus_score'].mean() if 'aplus_score' in full_df.columns else 50,
+                '搜索得分': full_df['search_score'].mean() if 'search_score' in full_df.columns else 50,
+                '详情得分': full_df['listing_score'].mean() if 'listing_score' in full_df.columns else 50,
+                '转化得分': full_df['Conversion_Score'].mean() if 'Conversion_Score' in full_df.columns else 50,
+                '综合总分': full_df['Total_Score'].mean() if 'Total_Score' in full_df.columns else 50
+            }
+            new_product['数据集平均'] = new_product['维度'].map(avg_vals)
+            new_product['差值'] = new_product['新品得分'] - new_product['数据集平均']
+            st.dataframe(new_product, use_container_width=True, hide_index=True)
+
+            # ========= 4. 细化优化建议 =========
+            st.subheader("💡 针对性优化建议（细化版）")
+
+            # 4a. 标题具体建议
+            title_advice = []
+            if title_score_val < avg_vals['标题得分'] - 5:
+                if not new_title:
+                    title_advice.append("❌ **标题为空**，请填写标题。")
+                else:
+                    if len(new_title) < 30:
+                        title_advice.append(
+                            "🔤 **标题过短**（当前 {} 字符），建议增加到 50-80 字符，包含品牌、核心关键词、规格。".format(
+                                len(new_title)))
+                    if not has_num:
+                        title_advice.append(
+                            "🔢 **标题缺少数字**（如容量、尺寸、功率），建议添加具体规格，例如 '500ml'、'24W' 等。")
+                    if not has_unit:
+                        title_advice.append("📏 **标题缺少单位**（如 cm, kg, W），建议加入单位词增强专业性。")
+                    if title_word_count < 5:
+                        title_advice.append(
+                            "📝 **标题词数过少**（当前 {} 词），建议使用 5-10 个关键词组合。".format(title_word_count))
+                    # 检查是否包含品牌名（简单假设品牌为第一个词）
+                    if new_title.split()[0].lower() not in ['premium', 'professional', 'high', 'quality']:
+                        title_advice.append(
+                            "🏷️ **建议在标题开头加入品牌名或强度词**（如 Premium, Professional），提升品质感。")
+            else:
+                title_advice.append("✅ 标题得分较高，继续保持。")
+
+            # 4b. 五点描述具体建议
+            feat_advice = []
+            if feat_avg < avg_vals['五点描述得分'] - 5:
+                if not features_list:
+                    feat_advice.append("❌ **五点描述为空**，请至少填写 3-5 条卖点。")
+                else:
+                    # 逐条分析
+                    for i, detail in enumerate(feat_details):
+                        if detail['score'] < 50:
+                            feat_advice.append(
+                                f"📌 第 {i + 1} 条（{detail['text']}）得分较低（{detail['score']:.1f}），建议：")
+                            if not detail['has_user_mention']:
+                                feat_advice.append(f"   - 加入‘您’、‘你的’等用户导向词汇，增强亲和力。")
+                            if not detail['has_differentiation']:
+                                feat_advice.append(f"   - 强调差异化卖点（如‘独特’、‘独家’、‘最佳’）。")
+                            if len(detail['text']) < 10:
+                                feat_advice.append(f"   - 描述过短，建议详细说明使用场景或解决的用户问题。")
+                    if len(features_list) < 3:
+                        feat_advice.append(
+                            "📋 **五点描述数量不足**（当前 {} 条），建议至少 3 条，最好 5 条。".format(len(features_list)))
+            else:
+                feat_advice.append("✅ 五点描述得分较高，继续保持。")
+
+            # 4c. 图片具体建议
+            img_advice = []
+            if uploaded_images:
+                # 与数据集图片得分对比（如果数据集有图片得分）
+                dataset_img_mean = full_df['image_score'].mean() if 'image_score' in full_df.columns else 50
+                if img_avg < dataset_img_mean - 5:
+                    # 细化到心理维度
+                    # 计算各维度平均（从img_details）
+                    avg_trust = np.mean([d['trust'] for d in img_details]) if img_details else 0
+                    avg_quality = np.mean([d['quality'] for d in img_details]) if img_details else 0
+                    avg_value = np.mean([d['value'] for d in img_details]) if img_details else 0
+                    avg_usage = np.mean([d['usage'] for d in img_details]) if img_details else 0
+                    avg_risk = np.mean([d['risk'] for d in img_details]) if img_details else 0
+                    img_advice.append("🖼️ **图片得分偏低**，具体建议：")
+                    if avg_trust < 60:
+                        img_advice.append("   - **信任感不足**：图片不够专业或清晰，建议使用白底高清图，或加入实物对比图。")
+                    if avg_quality < 60:
+                        img_advice.append("   - **品质感知弱**：图片看起来廉价，建议提升拍摄光线和构图，突出产品材质。")
+                    if avg_value < 60:
+                        img_advice.append("   - **价值感不强**：图片未展示产品附加价值，可加入赠品或功能标注。")
+                    if avg_usage < 60:
+                        img_advice.append("   - **使用场景缺失**：建议加入 1-2 张使用场景图，让用户想象实际应用。")
+                    if avg_risk < 60:
+                        img_advice.append("   - **风险消除不足**：建议加入尺寸标注、功能介绍图，降低购买疑虑。")
+                else:
+                    img_advice.append("✅ 图片得分较高，继续保持。")
+            else:
+                img_advice.append("ℹ️ 未上传图片，无法提供图片优化建议。建议上传主图、场景图进行诊断。")
+
+            # 4d. 其他维度建议
+            other_advice = []
+            if price_score < avg_vals['价格得分'] - 5:
+                other_advice.append("💰 **价格竞争力不足**：当前价格高于数据集同类产品，建议适当降价或提供更多赠品。")
+            if trust_score_val < avg_vals['信任得分'] - 5:
+                other_advice.append("⭐ **信任得分偏低**：星级评分或评论数量不足，建议邀请用户留评、展示售后保障。")
+            if aplus_score < avg_vals['A+得分'] - 5 and not has_aplus:
+                other_advice.append("📄 **A+内容缺失**：建议添加 A+ 页面或品牌故事，增强品牌背书。")
+            if vid_s < avg_vals['视频得分'] - 5:
+                other_advice.append("🎬 **视频得分偏低**：缺少产品视频，建议制作 1-2 个使用演示或介绍视频。")
+
+            # 汇总所有建议
+            all_advice = title_advice + feat_advice + img_advice + other_advice
+            if not all_advice or all(all_advice.startswith("✅") for a in all_advice):
+                st.success("🎉 新品各项指标均优于或接近数据集平均水平，竞争力较强！")
+            else:
+                for a in all_advice:
+                    if a.startswith("✅"):
+                        st.markdown(f"<span style='color:green'>{a}</span>", unsafe_allow_html=True)
+                    elif a.startswith("❌") or a.startswith("⚠️"):
+                        st.markdown(f"<span style='color:red'>{a}</span>", unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"<span style='color:#FF8C00'>{a}</span>", unsafe_allow_html=True)
+
+            # ========= 5. 雷达图 =========
+            core_dims = ['搜索得分', '详情得分', '转化得分', '综合总分', '信任得分']
+            core_new = [title_score_val, round(listing_score, 2), round(conv_score, 2), round(total_score, 2),
+                        trust_score_val]
+            core_avg = [avg_vals[d] for d in core_dims]
+            st.subheader("📊 核心维度雷达图对比")
+            fig = go.Figure()
+            fig.add_trace(go.Scatterpolar(
+                r=core_new,
+                theta=core_dims,
+                fill='toself',
+                name='新品'
+            ))
+            fig.add_trace(go.Scatterpolar(
+                r=core_avg,
+                theta=core_dims,
+                fill='toself',
+                name='数据集平均'
+            ))
+            fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=True)
+            st.plotly_chart(fig, use_container_width=True)
+
 else:
     st.info("请上传原始爬虫 JSON 文件开始分析")
