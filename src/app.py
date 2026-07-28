@@ -97,8 +97,9 @@ def load_clip():
 @st.cache_resource
 def load_zero_shot():
     try:
-        print("🔧 加载零样本分类模型 (distilbert) ...")
-        return pipeline("zero-shot-classification", model="typeform/distilbert-base-uncased-mnli", device=-1)
+        print("🔧 加载零样本分类模型 (多语言 DeBERTa) ...")
+        # 替换为支持德语的多语言模型
+        return pipeline("zero-shot-classification", model="MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli", device=-1)
     except Exception as e:
         print(f"❌ 模型加载失败: {e}")
         return None
@@ -115,6 +116,17 @@ def load_sentiment_pipeline():
         except:
             print("❌ 情感模型加载失败")
             return None
+@st.cache_resource
+def load_gliner():
+    try:
+        print("🧠 加载 GLiNER2 多语言模型...")
+        from gliner import GLiNER
+        model = GLiNER.from_pretrained("urchade/gliner2_multi-v1")
+        print("✅ GLiNER2 加载完成")
+        return model
+    except Exception as e:
+        print(f"❌ GLiNER2 加载失败: {e}")
+        return None
 
 # ==================== 图片分析（CLIP） ====================
 LABELS = {
@@ -310,6 +322,73 @@ def score_features_batch(features, text2score):
     psycho_score = avg_psycho*0.7 + max_psycho*0.3
     total = count_score*0.3 + len_score*0.3 + psycho_score*0.4
     return round(min(total,100),2)
+# ==================== 信息覆盖度检查（基于 GLiNER2） ====================
+def fallback_check_coverage(text, language='en'):
+    """原关键词匹配方案，作为 GLiNER2 的降级备份"""
+    keywords = {
+        'en': {
+            'size': ['size', 'dimension', 'length', 'width', 'height', 'cm', 'mm', 'kg', 'g', 'ml', 'l'],
+            'material': ['material', 'fabric', 'leather', 'plastic', 'metal', 'wood', 'cotton', 'polyester'],
+            'warranty': ['warranty', 'guarantee', '2-year', '1-year', 'lifetime'],
+            'usage': ['use', 'applicable', 'suitable for', 'perfect for', 'ideal for', 'scenario'],
+            'differentiation': ['unique', 'exclusive', 'only', 'best', 'unlike', 'compare', 'than others', 'superior'],
+            'user_oriented': ['you', 'your', 'user', 'customer', 'comfort', 'enjoy', 'experience']
+        },
+        'de': {
+            'size': ['größe', 'abmessungen', 'länge', 'breite', 'höhe', 'cm', 'mm', 'kg', 'g', 'ml', 'l'],
+            'material': ['material', 'stoff', 'leder', 'kunststoff', 'holz', 'baumwolle', 'polyester'],
+            'warranty': ['garantie', 'gewährleistung', '2-jährig', '1-jährig', 'lebenslang'],
+            'usage': ['verwendung', 'geeignet für', 'perfekt für', 'ideal für', 'szenario', 'einsatz'],
+            'differentiation': ['einzigartig', 'exklusiv', 'nur', 'beste', 'anders als', 'vergleichen', 'überlegen'],
+            'user_oriented': ['sie', 'ihnen', 'ihr', 'benutzer', 'kunde', 'komfort', 'genießen', 'erleben']
+        }
+    }
+    lang = 'de' if language in ['de', 'ger'] else 'en'
+    kw = keywords.get(lang, keywords['en'])
+    text_lower = text.lower()
+    coverage = {}
+    for dim, words in kw.items():
+        coverage[dim] = 1 if any(w in text_lower for w in words) else 0
+    weights = {'size':0.2, 'material':0.2, 'warranty':0.1, 'usage':0.15, 'differentiation':0.2, 'user_oriented':0.15}
+    total = sum(coverage[dim] * weights[dim] for dim in weights) * 100
+    return {'coverage': coverage, 'total_score': round(total, 2)}
+
+def check_coverage(text, language='de'):
+    """
+    使用 GLiNER2 检查文本是否覆盖关键信息维度。
+    返回各维度的覆盖情况（0/1）和总分（0-100）。
+    """
+    if not text or len(text.strip()) < 5:
+        return {'coverage': {}, 'total_score': 0}
+    
+    model = load_gliner()
+    if model is None:
+        return fallback_check_coverage(text, language)
+    
+    entity_types = {
+        'size': "product dimensions, size, weight, volume, length, width, height",
+        'material': "product material, fabric, leather, plastic, metal, wood, cotton, polyester",
+        'warranty': "warranty, guarantee, after-sales service, return policy",
+        'usage': "product use, application, suitable scenarios, target users",
+        'differentiation': "unique features, competitive advantages, exclusivity, unlike others",
+        'user_oriented': "user-centered benefits, customer comfort, user experience, satisfaction"
+    }
+    
+    try:
+        entities = model.extract_entities(text, labels=list(entity_types.values()))
+    except Exception as e:
+        print(f"⚠️ GLiNER2 提取实体失败: {e}")
+        return fallback_check_coverage(text, language)
+    
+    coverage = {}
+    for dim, desc in entity_types.items():
+        matched = any(e['label'] == desc for e in entities)
+        coverage[dim] = 1 if matched else 0
+    
+    weights = {'size':0.2, 'material':0.2, 'warranty':0.1, 'usage':0.15, 
+               'differentiation':0.2, 'user_oriented':0.15}
+    total = sum(coverage[dim] * weights[dim] for dim in weights) * 100
+    return {'coverage': coverage, 'total_score': round(total, 2)}
 
 def score_attributes(attributes):
     if not attributes:
@@ -626,6 +705,13 @@ def run_full_analysis(classified_data, limit=10):
         elif reviews>500: trust_bonus += 1.5
         elif reviews>100: trust_bonus += 0.5
         final = min(base + brand_bonus + trust_bonus, 100)
+                # 计算覆盖度
+        cov_scores = []
+        for feat in features:
+            cov = check_coverage(feat, language='de')
+            cov_scores.append(cov['total_score'])
+        avg_cov = np.mean(cov_scores) if cov_scores else 0
+        
         listing_results.append({
             "asin": asin,
             "bullet_score": feat_s,
@@ -636,7 +722,8 @@ def run_full_analysis(classified_data, limit=10):
             "image_score": img_s,
             "brand_bonus": brand_bonus,
             "trust_bonus": round(trust_bonus,2),
-            "listing_score": round(final,2)
+            "listing_score": round(final,2),
+            "coverage_score": round(avg_cov, 2)   # 新增
         })
         if (idx+1) % 5 == 0 or idx == len(listing_list)-1:
             print(f"  详情进度 {idx+1}/{len(listing_list)}")
@@ -862,12 +949,15 @@ if uploaded_file is not None:
                     has_differentiation = any(
                         w in feat.lower() for w in ['unique', 'different', 'exclusive', 'only', 'best'])
                     feat_scores.append(single_score)
-                    feat_details.append({
-                        'text': feat[:50] + '...' if len(feat) > 50 else feat,
-                        'score': single_score,
-                        'has_user_mention': has_user_mention,
-                        'has_differentiation': has_differentiation
-                    })
+                    cov_result = check_coverage(feat, language='de')
+                feat_details.append({
+                    'text': feat[:50] + '...' if len(feat) > 50 else feat,
+                    'score': single_score,
+                    'has_user_mention': 'you' in feat.lower() or 'your' in feat.lower(),
+                    'has_differentiation': any(w in feat.lower() for w in ['unique','different','exclusive','only','best']),
+                    'coverage': cov_result['coverage'],
+                    'coverage_score': cov_result['total_score']
+                })
                 feat_avg = sum(feat_scores) / len(feat_scores) if feat_scores else 0
             else:
                 feat_avg = 0
@@ -1006,22 +1096,56 @@ if uploaded_file is not None:
                 title_advice.append("✅ 标题得分较高，继续保持。")
 
             # 4b. 五点描述具体建议
-            feat_advice = []
+                       feat_advice = []
             if feat_avg < avg_vals['五点描述得分'] - 5:
                 if not features_list:
                     feat_advice.append("❌ **五点描述为空**，请至少填写 3-5 条卖点。")
                 else:
                     # 逐条分析
                     for i, detail in enumerate(feat_details):
+                        issues = []
+                        # 1. 得分
                         if detail['score'] < 50:
+                            issues.append("得分较低")
+                        # 2. 用户导向
+                        if not detail.get('has_user_mention', False):
+                            issues.append("缺少'您/你的'等用户导向词汇")
+                        # 3. 差异化
+                        if not detail.get('has_differentiation', False):
+                            issues.append("缺少差异化卖点（如'独特'、'独家'）")
+                        # 4. 长度
+                        if len(detail['text']) < 10:
+                            issues.append("描述过短")
+                        # 5. 信息覆盖度缺失
+                        coverage = detail.get('coverage', {})
+                        missing = [dim for dim, val in coverage.items() if val == 0]
+                        if missing:
+                            dim_map = {
+                                'size': '尺寸/规格',
+                                'material': '材质',
+                                'warranty': '保修/售后',
+                                'usage': '使用场景',
+                                'differentiation': '差异化优势',
+                                'user_oriented': '用户导向'
+                            }
+                            missing_desc = ', '.join([dim_map.get(m, m) for m in missing])
+                            issues.append(f"缺少信息：{missing_desc}")
+                        
+                        if issues:
                             feat_advice.append(
-                                f"📌 第 {i + 1} 条（{detail['text']}）得分较低（{detail['score']:.1f}），建议：")
-                            if not detail['has_user_mention']:
-                                feat_advice.append(f"   - 加入‘您’、‘你的’等用户导向词汇，增强亲和力。")
-                            if not detail['has_differentiation']:
-                                feat_advice.append(f"   - 强调差异化卖点（如‘独特’、‘独家’、‘最佳’）。")
-                            if len(detail['text']) < 10:
-                                feat_advice.append(f"   - 描述过短，建议详细说明使用场景或解决的用户问题。")
+                                f"📌 第 {i+1} 条（{detail['text']}）：{'；'.join(issues)}。"
+                            )
+                            # 给出具体优化方向
+                            if "得分较低" in issues:
+                                feat_advice.append("   - 建议重新组织语言，突出核心卖点，增强说服力。")
+                            if "缺少'您/你的'等用户导向词汇" in issues:
+                                feat_advice.append("   - 可加入'您将获得…'、'为您设计'等表达，拉近与用户距离。")
+                            if "缺少差异化卖点" in issues:
+                                feat_advice.append("   - 强调与竞品不同的独特功能或设计，展示独家优势。")
+                            if "描述过短" in issues:
+                                feat_advice.append("   - 扩展描述，说明该特点如何解决用户的实际问题。")
+                            if "缺少信息" in issues[0]:
+                                feat_advice.append("   - 请补充上述缺失的信息维度，使描述更完整、更有说服力。")
                     if len(features_list) < 3:
                         feat_advice.append(
                             "📋 **五点描述数量不足**（当前 {} 条），建议至少 3 条，最好 5 条。".format(len(features_list)))
