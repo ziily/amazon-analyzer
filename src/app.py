@@ -1068,9 +1068,9 @@ if uploaded_file is not None:
             if vid_s < avg_vals['视频得分'] - 5:
                 other_advice.append("🎬 **视频得分偏低**：缺少产品视频，建议制作 1-2 个使用演示或介绍视频。")
 
-            # 汇总所有建议
+           # 汇总所有建议
             all_advice = title_advice + feat_advice + img_advice + other_advice
-            if not all_advice or all(all_advice.startswith("✅") for a in all_advice):
+            if not all_advice or all(a.startswith("✅") for a in all_advice):
                 st.success("🎉 新品各项指标均优于或接近数据集平均水平，竞争力较强！")
             else:
                 for a in all_advice:
@@ -1080,7 +1080,6 @@ if uploaded_file is not None:
                         st.markdown(f"<span style='color:red'>{a}</span>", unsafe_allow_html=True)
                     else:
                         st.markdown(f"<span style='color:#FF8C00'>{a}</span>", unsafe_allow_html=True)
-
             # ========= 5. 雷达图 =========
             core_dims = ['搜索得分', '详情得分', '转化得分', '综合总分', '信任得分']
             core_new = [title_score_val, round(listing_score, 2), round(conv_score, 2), round(total_score, 2),
