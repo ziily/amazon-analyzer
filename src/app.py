@@ -9,6 +9,7 @@ from io import BytesIO
 from PIL import Image
 import requests
 import torch
+import re
 from transformers import CLIPProcessor, CLIPModel, pipeline
 import psutil
 import plotly.express as px
@@ -55,6 +56,7 @@ CLASSIFICATION = {
     ]
 }
 
+
 def classify_raw_data(products):
     """输入原始产品列表，返回分类后的字典 {'搜索页信息': [...], ...}"""
     field_to_module = {}
@@ -84,6 +86,7 @@ def classify_raw_data(products):
         classified["市场信息"].append(market_dict)
     return classified
 
+
 # ==================== 全局模型缓存 ====================
 @st.cache_resource
 def load_clip():
@@ -94,15 +97,16 @@ def load_clip():
     print("✅ CLIP 加载完成")
     return model, processor
 
+
 @st.cache_resource
 def load_zero_shot():
     try:
-        print("🔧 加载零样本分类模型 (多语言 DeBERTa) ...")
-        # 替换为支持德语的多语言模型
-        return pipeline("zero-shot-classification", model="MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli", device=-1)
+        print("🔧 加载零样本分类模型 (轻量级 distilbert) ...")
+        return pipeline("zero-shot-classification", model="typeform/distilbert-base-uncased-mnli", device=-1)
     except Exception as e:
         print(f"❌ 模型加载失败: {e}")
         return None
+
 
 @st.cache_resource
 def load_sentiment_pipeline():
@@ -112,10 +116,13 @@ def load_sentiment_pipeline():
     except:
         try:
             print("📊 加载情感分析模型 (twitter-xlm-roberta)...")
-            return pipeline("sentiment-analysis", model="cardiffnlp/twitter-xlm-roberta-base-sentiment", device=-1, top_k=None)
+            return pipeline("sentiment-analysis", model="cardiffnlp/twitter-xlm-roberta-base-sentiment", device=-1,
+                            top_k=None)
         except:
             print("❌ 情感模型加载失败")
             return None
+
+
 @st.cache_resource
 def load_gliner():
     try:
@@ -127,6 +134,7 @@ def load_gliner():
     except Exception as e:
         print(f"❌ GLiNER2 加载失败: {e}")
         return None
+
 
 # ==================== 图片分析（CLIP） ====================
 LABELS = {
@@ -144,6 +152,7 @@ LABELS = {
 FEATURE_NAMES = list(LABELS.keys())[:-1]
 TEXT_PROMPTS = list(LABELS.values())
 
+
 def load_image_from_url(url):
     try:
         response = requests.get(url, timeout=10)
@@ -152,6 +161,7 @@ def load_image_from_url(url):
     except Exception as e:
         print(f"   ⚠️ 图片下载失败: {url[:80]}... ({e})")
         return None
+
 
 def analyze_image_with_clip(url, model, processor):
     img = load_image_from_url(url)
@@ -166,20 +176,22 @@ def analyze_image_with_clip(url, model, processor):
     scores = torch.sigmoid(positive - baseline)
     return {name: float(scores[i]) for i, name in enumerate(FEATURE_NAMES)}
 
+
 def calculate_consumer_score(row):
     itype = row["image_type"]
     if itype == "thumbnail":
-        score = (row["attention"]*0.35 + row["product_understanding"]*0.30 +
-                 row["quality_perception"]*0.20 + row["differentiation"]*0.15)
+        score = (row["attention"] * 0.35 + row["product_understanding"] * 0.30 +
+                 row["quality_perception"] * 0.20 + row["differentiation"] * 0.15)
     elif itype == "high_resolution":
-        score = (row["value_perception"]*0.30 + row["usage_imagination"]*0.25 +
-                 row["risk_reduction"]*0.25 + row["trust_signal"]*0.20)
+        score = (row["value_perception"] * 0.30 + row["usage_imagination"] * 0.25 +
+                 row["risk_reduction"] * 0.25 + row["trust_signal"] * 0.20)
     elif itype == "a_plus":
-        score = (row["trust_signal"]*0.35 + row["quality_perception"]*0.25 +
-                 row["differentiation"]*0.20 + row["value_perception"]*0.20)
+        score = (row["trust_signal"] * 0.35 + row["quality_perception"] * 0.25 +
+                 row["differentiation"] * 0.20 + row["value_perception"] * 0.20)
     else:
         score = 0
     return round(score * 100, 2)
+
 
 def aggregate_images(image_records):
     import hashlib
@@ -188,7 +200,7 @@ def aggregate_images(image_records):
     # ===== 缓存检查 =====
     url_str = "".join(sorted([r.get("image_url", "") for r in image_records]))
     cache_hash = hashlib.md5(url_str.encode()).hexdigest()[:12]
-    cache_dir = "data/cache"   # 已修正为相对路径，云上可用
+    cache_dir = "data/cache"  # 已修正为相对路径，云上可用
     cache_file = os.path.join(cache_dir, f"image_cache_{cache_hash}.csv")
 
     if os.path.exists(cache_file):
@@ -204,8 +216,8 @@ def aggregate_images(image_records):
 
     for i, rec in enumerate(image_records):
         if rec.get("image_url"):
-            if (i+1) % 10 == 0 or i == total-1:
-                print(f"  图片进度 {i+1}/{total}, 成功 {success}, 失败 {fail}")
+            if (i + 1) % 10 == 0 or i == total - 1:
+                print(f"  图片进度 {i + 1}/{total}, 成功 {success}, 失败 {fail}")
             features = analyze_image_with_clip(rec["image_url"], model, processor)
             if features:
                 success += 1
@@ -236,7 +248,8 @@ def aggregate_images(image_records):
             row["thumbnail_quality"] = thumb["quality_perception"].mean()
             row["thumbnail_purchase"] = thumb["purchase_intent"].mean()
         else:
-            row["thumbnail_score"] = row["thumbnail_attention"] = row["thumbnail_quality"] = row["thumbnail_purchase"] = 0
+            row["thumbnail_score"] = row["thumbnail_attention"] = row["thumbnail_quality"] = row[
+                "thumbnail_purchase"] = 0
         detail = group[group["image_type"] == "high_resolution"]
         if len(detail) > 0:
             row["detail_image_count"] = len(detail)
@@ -248,7 +261,8 @@ def aggregate_images(image_records):
             row["detail_risk"] = detail["risk_reduction"].mean()
         else:
             row["detail_image_count"] = 0
-            row["detail_visual_score"] = row["detail_best_score"] = row["detail_trust"] = row["detail_value"] = row["detail_usage"] = row["detail_risk"] = 0
+            row["detail_visual_score"] = row["detail_best_score"] = row["detail_trust"] = row["detail_value"] = row[
+                "detail_usage"] = row["detail_risk"] = 0
         aplus = group[group["image_type"] == "a_plus"]
         if len(aplus) > 0:
             row["aplus_count"] = len(aplus)
@@ -259,7 +273,8 @@ def aggregate_images(image_records):
             row["aplus_brand"] = aplus["differentiation"].mean()
         else:
             row["aplus_count"] = 0
-            row["aplus_mean_score"] = row["aplus_trust"] = row["aplus_quality"] = row["aplus_value"] = row["aplus_brand"] = 0
+            row["aplus_mean_score"] = row["aplus_trust"] = row["aplus_quality"] = row["aplus_value"] = row[
+                "aplus_brand"] = 0
         summary.append(row)
 
     result_df = pd.DataFrame(summary)
@@ -271,12 +286,15 @@ def aggregate_images(image_records):
 
     return result_df
 
+
 # ==================== 心理评分 ====================
-PSYCH_LABELS = ["quality","convenience","cost_saving","safety","social_status","health","durability","aesthetics","innovation","trust"]
+PSYCH_LABELS = ["quality", "convenience", "cost_saving", "safety", "social_status", "health", "durability",
+                "aesthetics", "innovation", "trust"]
+
 
 def batch_psych_scores(texts, classifier, batch_size=16):
     cache = {}
-    unique = list(set([t for t in texts if t and len(t.strip())>=3]))
+    unique = list(set([t for t in texts if t and len(t.strip()) >= 3]))
     if not unique:
         return {}
     if classifier is None:
@@ -288,7 +306,7 @@ def batch_psych_scores(texts, classifier, batch_size=16):
     print(f"🧠 开始心理评分，共 {len(unique)} 条唯一文本，分 {total_batches} 个批次")
 
     for i in range(0, len(unique), batch_size):
-        batch = unique[i:i+batch_size]
+        batch = unique[i:i + batch_size]
         batch_num = i // batch_size + 1
         print(f"  批次 {batch_num}/{total_batches}，处理 {len(batch)} 条文本")
         try:
@@ -298,30 +316,113 @@ def batch_psych_scores(texts, classifier, batch_size=16):
             for text, res in zip(batch, results):
                 scores = res['scores']
                 max_score = max(scores)
-                diversity = min(len([s for s in scores if s>0.3])/3, 1.0)
-                final = max_score*0.7 + diversity*0.3
-                cache[text] = round(final*100, 2)
+                diversity = min(len([s for s in scores if s > 0.3]) / 3, 1.0)
+                final = max_score * 0.7 + diversity * 0.3
+                cache[text] = round(final * 100, 2)
         except Exception as e:
             print(f"   ⚠️ 批次 {batch_num} 推理失败: {e}")
             for t in batch:
                 cache[t] = 0.0
     print(f"✅ 心理评分完成")
     return cache
+# ==================== 新增：信息点检测函数 ====================
+def check_info_points(text: str, language: str = "de") -> dict:
+    """检测文本是否包含材质、颜色、尺寸、功能、场景等信息点"""
+    patterns = {
+        "material": {
+            "en": r"leather|fabric|wood|metal|plastic|steel|oak|velvet|linen|pu|abs",
+            "de": r"leder|stoff|holz|metall|kunststoff|stahl|eiche|samt|leinen|pu|abs",
+        },
+        "color": {
+            "en": r"black|white|grey|gray|brown|blue|red|green|beige|navy",
+            "de": r"schwarz|weiß|grau|braun|blau|rot|grün|beige|marine",
+        },
+        "size": {
+            "en": r"\d+[\'\"]|\d+\s?(inch|cm|mm|ft)|\d+\s?(lb|kg|g)|\d+\s?set of \d+|\d+\s?pack",
+            "de": r"\d+\s?(cm|mm|m|kg|g|l|ml)|\d+\s?stück|\d+\s?set",
+        },
+        "function": {
+            "en": r"foldable|stackable|swivel|adjustable|ergonomic|reclining|portable|waterproof|breathable",
+            "de": r"faltbar|stapelbar|drehbar|verstellbar|ergonomisch|neigbar|tragbar|wasserdicht|atmungsaktiv",
+        },
+        "scenario": {
+            "en": r"kitchen|dining|office|living room|bedroom|outdoor|bar|home|work|study",
+            "de": r"küche|esszimmer|büro|wohnzimmer|schlafzimmer|draußen|bar|zuhause|arbeit|studium",
+        },
+    }
+    lang = "de" if language.lower() in ["de", "ger"] else "en"
+    text_lower = text.lower()
+    hit = {}
+    for dim, lang_dict in patterns.items():
+        pattern = lang_dict.get(lang, lang_dict["en"])
+        hit[dim] = 1 if re.search(pattern, text_lower, re.IGNORECASE) else 0
+    return hit
+
+# ==================== 新增：标题评分函数 ====================
+def compute_title_score(title: str, classifier=None) -> tuple:
+    """返回 (总分, 详情字典) 详情包含 length, psych, info, has_num, has_unit, hit"""
+    if not title:
+        return 0, {"length": 0, "psych": 0, "info": 0, "has_num": False, "has_unit": False, "hit": {}}
+
+    length = len(title)
+    if 60 <= length <= 180:
+        len_score = 100
+    elif 30 <= length < 60:
+        len_score = 70
+    elif 180 < length <= 250:
+        len_score = 80
+    elif length > 250:
+        len_score = 50
+    else:
+        len_score = 40
+
+    psych_score = 0.0
+    if classifier is not None and len(title) >= 3:
+        try:
+            res = classifier(title, PSYCH_LABELS)
+            scores = res['scores']
+            max_score = max(scores)
+            diversity = min(len([s for s in scores if s > 0.3]) / 3, 1.0)
+            psych_score = (max_score * 0.7 + diversity * 0.3) * 100
+        except:
+            pass
+
+    info_hit = check_info_points(title, language='de')
+    hit_count = sum(info_hit.values())
+    info_score = (hit_count / len(info_hit)) * 100
+
+    total = len_score * 0.25 + psych_score * 0.50 + info_score * 0.25
+    has_num = any(c.isdigit() for c in title)
+    has_unit = any(u in title.lower() for u in ['cm', 'mm', 'kg', 'g', 'ml', 'l', 'w', 'h'])
+    total += (5 if has_num else 0) + (5 if has_unit else 0)
+    total = round(min(total, 100), 2)
+
+    details = {
+        "length": len_score,
+        "psych": round(psych_score, 2),
+        "info": round(info_score, 2),
+        "has_num": has_num,
+        "has_unit": has_unit,
+        "hit": info_hit
+    }
+    return total, details
 
 # ==================== Listing 各维度评分 ====================
 def score_features_batch(features, text2score):
     if not features:
         return 0.0
     count = len(features)
-    count_score = min(count/5, 1.0)*100
-    avg_len = sum(len(f) for f in features)/count
-    len_score = min(avg_len/80, 1.0)*100
+    count_score = min(count / 5, 1.0) * 100
+    avg_len = sum(len(f) for f in features) / count
+    len_score = min(avg_len / 80, 1.0) * 100
     psycho_scores = [text2score.get(f, 0.0) for f in features]
-    avg_psycho = sum(psycho_scores)/len(psycho_scores)
+    avg_psycho = sum(psycho_scores) / len(psycho_scores)
     max_psycho = max(psycho_scores)
-    psycho_score = avg_psycho*0.7 + max_psycho*0.3
-    total = count_score*0.3 + len_score*0.3 + psycho_score*0.4
-    return round(min(total,100),2)
+    psycho_score = avg_psycho * 0.7 + max_psycho * 0.3
+    total = count_score * 0.3 + len_score * 0.3 + psycho_score * 0.4
+    return round(min(total, 100), 2)
+
+
 # ==================== 信息覆盖度检查（基于 GLiNER2） ====================
 def fallback_check_coverage(text, language='en'):
     """原关键词匹配方案，作为 GLiNER2 的降级备份"""
@@ -349,9 +450,11 @@ def fallback_check_coverage(text, language='en'):
     coverage = {}
     for dim, words in kw.items():
         coverage[dim] = 1 if any(w in text_lower for w in words) else 0
-    weights = {'size':0.2, 'material':0.2, 'warranty':0.1, 'usage':0.15, 'differentiation':0.2, 'user_oriented':0.15}
+    weights = {'size': 0.2, 'material': 0.2, 'warranty': 0.1, 'usage': 0.15, 'differentiation': 0.2,
+               'user_oriented': 0.15}
     total = sum(coverage[dim] * weights[dim] for dim in weights) * 100
     return {'coverage': coverage, 'total_score': round(total, 2)}
+
 
 def check_coverage(text, language='de'):
     """
@@ -360,11 +463,11 @@ def check_coverage(text, language='de'):
     """
     if not text or len(text.strip()) < 5:
         return {'coverage': {}, 'total_score': 0}
-    
+
     model = load_gliner()
     if model is None:
         return fallback_check_coverage(text, language)
-    
+
     entity_types = {
         'size': "product dimensions, size, weight, volume, length, width, height",
         'material': "product material, fabric, leather, plastic, metal, wood, cotton, polyester",
@@ -373,71 +476,78 @@ def check_coverage(text, language='de'):
         'differentiation': "unique features, competitive advantages, exclusivity, unlike others",
         'user_oriented': "user-centered benefits, customer comfort, user experience, satisfaction"
     }
-    
+
     try:
         entities = model.extract_entities(text, labels=list(entity_types.values()))
     except Exception as e:
         print(f"⚠️ GLiNER2 提取实体失败: {e}")
         return fallback_check_coverage(text, language)
-    
+
     coverage = {}
     for dim, desc in entity_types.items():
         matched = any(e['label'] == desc for e in entities)
         coverage[dim] = 1 if matched else 0
-    
-    weights = {'size':0.2, 'material':0.2, 'warranty':0.1, 'usage':0.15, 
-               'differentiation':0.2, 'user_oriented':0.15}
+
+    weights = {'size': 0.2, 'material': 0.2, 'warranty': 0.1, 'usage': 0.15,
+               'differentiation': 0.2, 'user_oriented': 0.15}
     total = sum(coverage[dim] * weights[dim] for dim in weights) * 100
     return {'coverage': coverage, 'total_score': round(total, 2)}
+
 
 def score_attributes(attributes):
     if not attributes:
         return 0.0
     count = len(attributes)
-    count_score = min(count/15, 1.0)*100
-    avg_len = sum(len(str(a.get("value",""))) for a in attributes)/count
-    len_score = min(avg_len/20, 1.0)*100
-    has_number = any(any(c.isdigit() for c in str(a.get("value",""))) for a in attributes)
+    count_score = min(count / 15, 1.0) * 100
+    avg_len = sum(len(str(a.get("value", ""))) for a in attributes) / count
+    len_score = min(avg_len / 20, 1.0) * 100
+    has_number = any(any(c.isdigit() for c in str(a.get("value", ""))) for a in attributes)
     numeric_bonus = 10 if has_number else 0
-    total = count_score*0.5 + len_score*0.4 + numeric_bonus
-    return round(min(total,100),2)
+    total = count_score * 0.5 + len_score * 0.4 + numeric_bonus
+    return round(min(total, 100), 2)
+
 
 def score_important(info):
     return 100.0 if info and info.get("items") else 0.0
+
 
 def score_aplus(aplus):
     if not aplus:
         return 0.0
     modules = aplus.get("modules", [])
-    mod_score = min(len(modules)/5, 1.0)*60
-    video_bonus = min(len(aplus.get("rawVideos", [])), 2)*15
+    mod_score = min(len(modules) / 5, 1.0) * 60
+    video_bonus = min(len(aplus.get("rawVideos", [])), 2) * 15
     img_count = sum(1 for img in aplus.get("rawImages", []) if img.get("url"))
-    img_bonus = min(img_count,3)*3
-    return round(min(mod_score+video_bonus+img_bonus,100),2)
+    img_bonus = min(img_count, 3) * 3
+    return round(min(mod_score + video_bonus + img_bonus, 100), 2)
+
 
 def score_video(count):
-    if count is None or count==0:
+    if count is None or count == 0:
         return 0.0
-    return 100.0 if count>=3 else (90.0 if count==2 else 70.0)
+    return 100.0 if count >= 3 else (90.0 if count == 2 else 70.0)
+
 
 def score_images(asin, image_dict):
     if asin not in image_dict:
         return 20.0
     info = image_dict[asin]
-    thumb = info.get("thumbnail_score",0)
-    thumb_purchase = info.get("thumbnail_purchase",0)
-    main_score = thumb*0.6 + thumb_purchase*0.4
-    detail_visual = info.get("detail_visual_score",0)
-    detail_risk = info.get("detail_risk",0)
-    detail_score = detail_visual*0.6 + detail_risk*0.4
-    aplus_mean = info.get("aplus_mean_score",0)
-    aplus_trust = info.get("aplus_trust",0)
-    aplus_score = aplus_mean*0.5 + aplus_trust*0.5
-    total = main_score*0.40 + detail_score*0.40 + aplus_score*0.20
-    return round(total,2)
+    thumb = info.get("thumbnail_score", 0)
+    thumb_purchase = info.get("thumbnail_purchase", 0)
+    main_score = thumb * 0.6 + thumb_purchase * 0.4
+    detail_visual = info.get("detail_visual_score", 0)
+    detail_risk = info.get("detail_risk", 0)
+    detail_score = detail_visual * 0.6 + detail_risk * 0.4
+    aplus_mean = info.get("aplus_mean_score", 0)
+    aplus_trust = info.get("aplus_trust", 0)
+    aplus_score = aplus_mean * 0.5 + aplus_trust * 0.5
+    total = main_score * 0.40 + detail_score * 0.40 + aplus_score * 0.20
+    return round(total, 2)
+
 
 def score_brandstory(story):
     return 100.0 if story and story.get("items") else 0.0
+
 
 # ==================== 评论分析 ====================
 def analyze_reviews(review_data, sentiment_pipeline):
@@ -447,28 +557,30 @@ def analyze_reviews(review_data, sentiment_pipeline):
         reviews_link = rev.get("reviewsLink", "")
         asin = reviews_link.split("/")[-1].split("?")[0] if reviews_link else None
         if not asin:
-            asin = f"Unknown_{idx+1}"
+            asin = f"Unknown_{idx + 1}"
         if idx % 10 == 0:
-            print(f"  评论进度 {idx+1}/{len(review_data)}")
+            print(f"  评论进度 {idx + 1}/{len(review_data)}")
 
         stars_br = rev.get("starsBreakdown") or {}
-        avg_stars = (stars_br.get("5star",0)*5 + stars_br.get("4star",0)*4 +
-                     stars_br.get("3star",0)*3 + stars_br.get("2star",0)*2 + stars_br.get("1star",0)*1)
+        avg_stars = (stars_br.get("5star", 0) * 5 + stars_br.get("4star", 0) * 4 +
+                     stars_br.get("3star", 0) * 3 + stars_br.get("2star", 0) * 2 + stars_br.get("1star", 0) * 1)
         ai_summary = rev.get("aiReviewsSummary") or {}
         keywords = ai_summary.get("keywords", [])
-        pos_mentions = sum(kw.get("customersMentionedCount",{}).get("total",0) for kw in keywords if kw.get("sentiment")=="positive")
-        neg_mentions = sum(kw.get("customersMentionedCount",{}).get("total",0) for kw in keywords if kw.get("sentiment")=="negative")
+        pos_mentions = sum(kw.get("customersMentionedCount", {}).get("total", 0) for kw in keywords if
+                           kw.get("sentiment") == "positive")
+        neg_mentions = sum(kw.get("customersMentionedCount", {}).get("total", 0) for kw in keywords if
+                           kw.get("sentiment") == "negative")
         total_mentions = pos_mentions + neg_mentions
-        ai_pos_ratio = pos_mentions/total_mentions if total_mentions>0 else 0.5
+        ai_pos_ratio = pos_mentions / total_mentions if total_mentions > 0 else 0.5
 
         all_reviews = []
         for r in rev.get("productPageReviews", []):
-            desc = r.get("reviewDescription","")
+            desc = r.get("reviewDescription", "")
             rating = r.get("ratingScore")
             if desc and rating:
                 all_reviews.append((desc, rating))
         for r in rev.get("productPageReviewsFromOtherCountries", []):
-            desc = r.get("reviewDescription","")
+            desc = r.get("reviewDescription", "")
             rating = r.get("ratingScore")
             if desc and rating:
                 all_reviews.append((desc, rating))
@@ -476,7 +588,7 @@ def analyze_reviews(review_data, sentiment_pipeline):
         sentiment_scores = []
         if sentiment_pipeline:
             for text, _ in all_reviews:
-                if len(text.strip())<3:
+                if len(text.strip()) < 3:
                     continue
                 text = text[:512]
                 try:
@@ -488,41 +600,43 @@ def analyze_reviews(review_data, sentiment_pipeline):
                             labels = res
                         probs = {item['label']: item['score'] for item in labels}
                         if 'positive' in probs:
-                            score = probs.get('positive',0) - probs.get('negative',0)
+                            score = probs.get('positive', 0) - probs.get('negative', 0)
                         else:
-                            score_map = {'LABEL_0':-1, 'LABEL_1':0, 'LABEL_2':1}
-                            score = sum(probs.get(label,0)*score_map[label] for label in score_map)
+                            score_map = {'LABEL_0': -1, 'LABEL_1': 0, 'LABEL_2': 1}
+                            score = sum(probs.get(label, 0) * score_map[label] for label in score_map)
                         sentiment_scores.append(score)
                 except:
                     pass
         avg_sentiment = np.mean(sentiment_scores) if sentiment_scores else 0.0
         if sentiment_scores:
-            positive_ratio = sum(1 for s in sentiment_scores if s>0.3) / len(sentiment_scores)
-            neutral_ratio = sum(1 for s in sentiment_scores if -0.3<=s<=0.3) / len(sentiment_scores)
-            negative_ratio = sum(1 for s in sentiment_scores if s<-0.3) / len(sentiment_scores)
+            positive_ratio = sum(1 for s in sentiment_scores if s > 0.3) / len(sentiment_scores)
+            neutral_ratio = sum(1 for s in sentiment_scores if -0.3 <= s <= 0.3) / len(sentiment_scores)
+            negative_ratio = sum(1 for s in sentiment_scores if s < -0.3) / len(sentiment_scores)
         else:
             positive_ratio = neutral_ratio = negative_ratio = 0
 
         total_comments = len(all_reviews)
-        stars_norm = avg_stars/5 if avg_stars else 0.5
-        sent_norm = (avg_sentiment+1)/2 if avg_sentiment is not None else 0.5
+        stars_norm = avg_stars / 5 if avg_stars else 0.5
+        sent_norm = (avg_sentiment + 1) / 2 if avg_sentiment is not None else 0.5
         pos_norm = positive_ratio if positive_ratio is not None else 0.5
-        count_norm = min(math.log(total_comments+1)/math.log(1001),1.0) if total_comments else 0.0
+        count_norm = min(math.log(total_comments + 1) / math.log(1001), 1.0) if total_comments else 0.0
         ai_norm = ai_pos_ratio if ai_pos_ratio is not None else 0.5
-        w = [0.30,0.30,0.20,0.10,0.10]
-        final_score = (stars_norm*w[0] + sent_norm*w[1] + pos_norm*w[2] + count_norm*w[3] + ai_norm*w[4])*100
+        w = [0.30, 0.30, 0.20, 0.10, 0.10]
+        final_score = (stars_norm * w[0] + sent_norm * w[1] + pos_norm * w[2] + count_norm * w[3] + ai_norm * w[
+            4]) * 100
         results.append({
             "ASIN": asin,
-            "Avg_Stars": round(avg_stars,2),
+            "Avg_Stars": round(avg_stars, 2),
             "Total_Reviews_Count": total_comments,
-            "Avg_Sentiment_Score": round(avg_sentiment,3),
-            "Positive%": round(positive_ratio*100,1),
-            "Neutral%": round(neutral_ratio*100,1),
-            "Negative%": round(negative_ratio*100,1),
-            "Conversion_Score": round(final_score,2)
+            "Avg_Sentiment_Score": round(avg_sentiment, 3),
+            "Positive%": round(positive_ratio * 100, 1),
+            "Neutral%": round(neutral_ratio * 100, 1),
+            "Negative%": round(negative_ratio * 100, 1),
+            "Conversion_Score": round(final_score, 2)
         })
     print("✅ 评论分析完成")
     return pd.DataFrame(results)
+
 
 # ==================== 主分析流水线 ====================
 def run_full_analysis(classified_data, limit=10):
@@ -551,29 +665,30 @@ def run_full_analysis(classified_data, limit=10):
         asin = product.get("originalAsin")
         high = product.get("highResolutionImages", [])
         for idx, url in enumerate(high):
-            image_rows.append({"asin":asin, "image_type":"high_resolution", "image_index":idx, "image_url":url})
+            image_rows.append({"asin": asin, "image_type": "high_resolution", "image_index": idx, "image_url": url})
         aplus = product.get("aPlusContent")
         if aplus:
             def extract_urls(obj):
-                urls=[]
-                if isinstance(obj,dict):
-                    for k,v in obj.items():
-                        if k=="url" and isinstance(v,str):
+                urls = []
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        if k == "url" and isinstance(v, str):
                             urls.append(v)
                         else:
                             urls.extend(extract_urls(v))
-                elif isinstance(obj,list):
+                elif isinstance(obj, list):
                     for item in obj:
                         urls.extend(extract_urls(item))
                 return urls
+
             aplus_urls = extract_urls(aplus)
             for idx, url in enumerate(aplus_urls):
-                image_rows.append({"asin":asin, "image_type":"a_plus", "image_index":idx, "image_url":url})
+                image_rows.append({"asin": asin, "image_type": "a_plus", "image_index": idx, "image_url": url})
     for product in search_list:
         asin = product.get("asin")
         thumb = product.get("thumbnailImage")
         if thumb:
-            image_rows.append({"asin":asin, "image_type":"thumbnail", "image_index":0, "image_url":thumb})
+            image_rows.append({"asin": asin, "image_type": "thumbnail", "image_index": 0, "image_url": thumb})
     print(f"🖼️ 共提取 {len(image_rows)} 张图片URL")
     progress_bar.progress(15, f"提取图片 {len(image_rows)} 张")
 
@@ -606,23 +721,18 @@ def run_full_analysis(classified_data, limit=10):
     # 搜索页评分
     print("🔍 开始搜索页评分...")
     t_search = time.time()
-    prices = [p.get("price",{}).get("value") for p in search_list if p.get("price")]
+    prices = [p.get("price", {}).get("value") for p in search_list if p.get("price")]
     search_results = []
     for idx, item in enumerate(search_list):
         asin = item.get("asin")
-        print(f"  搜索 ASIN {idx+1}/{len(search_list)}: {asin}")
+        print(f"  搜索 ASIN {idx + 1}/{len(search_list)}: {asin}")
         title = item.get("title")
-        price = item.get("price",{}).get("value")
+        price = item.get("price", {}).get("value")
         stars = item.get("stars")
         reviews = item.get("reviewsCount")
-        position = item.get("categoryPageData",{}).get("productPosition")
-        title_psych = text2score.get(title, 0.0) if title else 0.0
-        title_score_val = title_psych*0.8 + min(len(title)/100,1.0)*20 if title else 0
-        if title:
-            has_num = any(c.isdigit() for c in title)
-            has_unit = any(u in title.lower() for u in ['cm','mm','kg','g','ml','l','w','h'])
-            title_score_val += (5 if has_num else 0) + (5 if has_unit else 0)
-        title_score_val = round(min(title_score_val,100),2)
+        position = item.get("categoryPageData", {}).get("productPosition")
+        # 使用新的标题评分函数
+        title_score_val, title_details = compute_title_score(title, classifier)
         thumb_score = image_dict.get(asin, {}).get("thumbnail_score", 0)
         if price is not None and prices:
             valid_prices = [x for x in prices if x is not None]
@@ -633,36 +743,37 @@ def run_full_analysis(classified_data, limit=10):
                 price_score = 50
         else:
             price_score = 50
-        if stars is None: stars=0
-        if reviews is None: reviews=0
-        rating = stars/5
-        review_norm = min(math.log(reviews+1)/math.log(100000),1) if reviews>0 else 0
-        trust = rating*0.6 + review_norm*0.4
-        trust_score_val = round(trust*100,2)
-        if position is not None and position>0:
-            pos_score = 1/math.log(position+2)
+        if stars is None: stars = 0
+        if reviews is None: reviews = 0
+        rating = stars / 5
+        review_norm = min(math.log(reviews + 1) / math.log(100000), 1) if reviews > 0 else 0
+        trust = rating * 0.6 + review_norm * 0.4
+        trust_score_val = round(trust * 100, 2)
+        if position is not None and position > 0:
+            pos_score = 1 / math.log(position + 2)
         else:
             pos_score = 0
-        pos_score = round(pos_score*100,2)
-        search_score = (title_score_val*0.25 + thumb_score*0.30 + price_score*0.15 +
-                        trust_score_val*0.20 + pos_score*0.10)
-        search_score = round(search_score,2)
+        pos_score = round(pos_score * 100, 2)
+        search_score = (title_score_val * 0.25 + thumb_score * 0.30 + price_score * 0.15 +
+                        trust_score_val * 0.20 + pos_score * 0.10)
+        search_score = round(search_score, 2)
         search_results.append({
             "asin": asin,
             "title_score": title_score_val,
             "thumbnail_score": thumb_score,
-            "price_score": price_score,
+            "price_score": price_score,  # 保留得分（用于其他对比）
+            "price_value": price,  # 新增：实际价格
             "trust_score": trust_score_val,
             "position_score": pos_score,
             "search_score": search_score,
             "stars": stars,
             "reviews": reviews
         })
-        if (idx+1) % 5 == 0 or idx == len(search_list)-1:
-            print(f"  搜索进度 {idx+1}/{len(search_list)}")
+        if (idx + 1) % 5 == 0 or idx == len(search_list) - 1:
+            print(f"  搜索进度 {idx + 1}/{len(search_list)}")
     search_df = pd.DataFrame(search_results)
     search_df["search_rank"] = search_df["search_score"].rank(ascending=False, method="min")
-    print(f"✅ 搜索页评分完成，耗时 {time.time()-t_search:.2f} 秒")
+    print(f"✅ 搜索页评分完成，耗时 {time.time() - t_search:.2f} 秒")
     progress_bar.progress(70, "搜索页评分完成")
 
     # Listing评分
@@ -673,7 +784,7 @@ def run_full_analysis(classified_data, limit=10):
         asin = listing.get("originalAsin")
         if not asin:
             continue
-        print(f"  详情 ASIN {idx+1}/{len(listing_list)}: {asin}")
+        print(f"  详情 ASIN {idx + 1}/{len(listing_list)}: {asin}")
         features = listing.get("features", []) or []
         attributes = listing.get("attributes", []) or []
         important = listing.get("importantInformation")
@@ -687,31 +798,36 @@ def run_full_analysis(classified_data, limit=10):
         vid_s = score_video(videos)
         img_s = score_images(asin, image_dict)
         brand_s = score_brandstory(brand)
-        weights = {"features":0.30, "attributes":0.25, "important":0.05, "aplus":0.10, "video":0.05, "image":0.25}
-        base = (feat_s*weights["features"] + attr_s*weights["attributes"] +
-                imp_s*weights["important"] + aplus_s*weights["aplus"] +
-                vid_s*weights["video"] + img_s*weights["image"])
-        brand_bonus = 10 if brand_s>0 else 0
-        search_row = search_df[search_df["asin"]==asin]
+        weights = {"features": 0.30, "attributes": 0.25, "important": 0.05, "aplus": 0.10, "video": 0.05, "image": 0.25}
+        base = (feat_s * weights["features"] + attr_s * weights["attributes"] +
+                imp_s * weights["important"] + aplus_s * weights["aplus"] +
+                vid_s * weights["video"] + img_s * weights["image"])
+        brand_bonus = 10 if brand_s > 0 else 0
+        search_row = search_df[search_df["asin"] == asin]
         if not search_row.empty:
             stars = search_row.iloc[0].get("stars", 0)
             reviews = search_row.iloc[0].get("reviews", 0)
         else:
             stars = reviews = 0
         trust_bonus = 0
-        if stars>=4.5: trust_bonus += 4
-        elif stars>=4.2: trust_bonus += 2
-        if reviews>1000: trust_bonus += 3
-        elif reviews>500: trust_bonus += 1.5
-        elif reviews>100: trust_bonus += 0.5
+        if stars >= 4.5:
+            trust_bonus += 4
+        elif stars >= 4.2:
+            trust_bonus += 2
+        if reviews > 1000:
+            trust_bonus += 3
+        elif reviews > 500:
+            trust_bonus += 1.5
+        elif reviews > 100:
+            trust_bonus += 0.5
         final = min(base + brand_bonus + trust_bonus, 100)
-                # 计算覆盖度
+        # 计算覆盖度
         cov_scores = []
         for feat in features:
             cov = check_coverage(feat, language='de')
             cov_scores.append(cov['total_score'])
         avg_cov = np.mean(cov_scores) if cov_scores else 0
-        
+
         listing_results.append({
             "asin": asin,
             "bullet_score": feat_s,
@@ -721,15 +837,15 @@ def run_full_analysis(classified_data, limit=10):
             "video_score": vid_s,
             "image_score": img_s,
             "brand_bonus": brand_bonus,
-            "trust_bonus": round(trust_bonus,2),
-            "listing_score": round(final,2),
-            "coverage_score": round(avg_cov, 2)   # 新增
+            "trust_bonus": round(trust_bonus, 2),
+            "listing_score": round(final, 2),
+            "coverage_score": round(avg_cov, 2)  # 新增
         })
-        if (idx+1) % 5 == 0 or idx == len(listing_list)-1:
-            print(f"  详情进度 {idx+1}/{len(listing_list)}")
+        if (idx + 1) % 5 == 0 or idx == len(listing_list) - 1:
+            print(f"  详情进度 {idx + 1}/{len(listing_list)}")
     listing_df = pd.DataFrame(listing_results)
     listing_df["listing_rank"] = listing_df["listing_score"].rank(ascending=False, method="min")
-    print(f"✅ 详情页评分完成，耗时 {time.time()-t_list:.2f} 秒")
+    print(f"✅ 详情页评分完成，耗时 {time.time() - t_list:.2f} 秒")
     progress_bar.progress(85, "Listing评分完成")
 
     # 评论分析
@@ -737,7 +853,7 @@ def run_full_analysis(classified_data, limit=10):
     t_rev = time.time()
     sentiment_pipeline = load_sentiment_pipeline()
     review_df = analyze_reviews(review_list, sentiment_pipeline)
-    print(f"✅ 评论分析完成，耗时 {time.time()-t_rev:.2f} 秒")
+    print(f"✅ 评论分析完成，耗时 {time.time() - t_rev:.2f} 秒")
     progress_bar.progress(95, "评论分析完成")
 
     # 合并
@@ -753,8 +869,9 @@ def run_full_analysis(classified_data, limit=10):
                   "listing_score", "Conversion_Score", "search_rank"]
     final_df = merged[[c for c in final_cols if c in merged.columns]]
     progress_bar.progress(100, "分析完成！")
-    print(f"✅ 全部分析完成！总耗时 {time.time()-total_start:.2f} 秒")
+    print(f"✅ 全部分析完成！总耗时 {time.time() - total_start:.2f} 秒")
     return final_df, merged
+
 
 # ==================== Streamlit UI ====================
 st.title("📊 Amazon 产品竞争力分析仪表板")
@@ -817,8 +934,8 @@ if uploaded_file is not None:
         st.line_chart(final_df[["search_score", "Detail_Conversion"]].head(30))
         st.caption("搜索分 vs 转化分（前30）")
     with col4:
-        fig, ax = plt.subplots(figsize=(8,4))
-        final_df[["search_score","Detail_Conversion","Total_Score"]].boxplot(ax=ax)
+        fig, ax = plt.subplots(figsize=(8, 4))
+        final_df[["search_score", "Detail_Conversion", "Total_Score"]].boxplot(ax=ax)
         st.pyplot(fig)
 
     st.subheader("🔍 单品对比分析")
@@ -826,8 +943,8 @@ if uploaded_file is not None:
     selected_asin = st.selectbox("选择或输入 ASIN", asin_list)
 
     if selected_asin:
-        row = full_df[full_df["asin"]==selected_asin].iloc[0]
-        numeric_cols = ["search_score","Detail_Conversion","Total_Score","listing_score","Conversion_Score"]
+        row = full_df[full_df["asin"] == selected_asin].iloc[0]
+        numeric_cols = ["search_score", "Detail_Conversion", "Total_Score", "listing_score", "Conversion_Score"]
         means = full_df[numeric_cols].mean()
 
         st.subheader("📊 雷达图对比")
@@ -844,7 +961,7 @@ if uploaded_file is not None:
             fill='toself',
             name='整体平均'
         ))
-        fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,100])), showlegend=True)
+        fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=True)
         st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("✨ 亮点与痛点")
@@ -901,31 +1018,19 @@ if uploaded_file is not None:
 
             # ========= 2. 计算文本维度得分 =========
             # 2a. 标题详细分析
-            title_psych = 0.0
-            if classifier is not None and new_title:
-                try:
-                    res = classifier(new_title, PSYCH_LABELS)
-                    scores = res['scores']
-                    max_score = max(scores)
-                    diversity = min(len([s for s in scores if s > 0.3]) / 3, 1.0)
-                    title_psych = (max_score * 0.7 + diversity * 0.3) * 100
-                except:
-                    pass
-            title_score_val = title_psych * 0.8 + min(len(new_title) / 100, 1.0) * 20 if new_title else 0
-            # 检查标题构成
-            has_num = any(c.isdigit() for c in new_title) if new_title else False
-            has_unit = any(
-                u in new_title.lower() for u in ['cm', 'mm', 'kg', 'g', 'ml', 'l', 'w', 'h']) if new_title else False
+            # 使用新标题评分函数
+            title_score_val, title_details = compute_title_score(new_title, classifier)
+            has_num = title_details.get('has_num', False)
+            has_unit = title_details.get('has_unit', False)
             title_word_count = len(new_title.split()) if new_title else 0
-            if new_title:
-                title_score_val += (5 if has_num else 0) + (5 if has_unit else 0)
-            title_score_val = round(min(title_score_val, 100), 2)
+            info_hit_title = title_details.get('hit', {})
 
             # 2b. 价格得分
-            price_list = full_df['price_score'].dropna().tolist() if 'price_score' in full_df.columns else []
-            if price_list and new_price:
-                rank = sum(x > new_price for x in price_list)
-                price_score = round(rank / len(price_list) * 100, 2) if price_list else 50
+            # 从 full_df 中获取所有产品的实际价格
+            price_values = full_df['price_value'].dropna().tolist()
+            if price_values and new_price:
+                rank = sum(x > new_price for x in price_values)
+                price_score = round(rank / len(price_values) * 100, 2) if price_values else 50
             else:
                 price_score = 50
 
@@ -941,23 +1046,24 @@ if uploaded_file is not None:
             if features_list and classifier:
                 temp_text2score = batch_psych_scores(features_list, classifier)
                 for idx, feat in enumerate(features_list):
-                    # 单条得分
                     single_score = score_features_batch([feat], temp_text2score)
-                    # 简单规则：是否包含“you/your”（用户导向）
                     has_user_mention = 'you' in feat.lower() or 'your' in feat.lower()
-                    # 是否提到对比或独特卖点
                     has_differentiation = any(
                         w in feat.lower() for w in ['unique', 'different', 'exclusive', 'only', 'best'])
                     feat_scores.append(single_score)
                     cov_result = check_coverage(feat, language='de')
-                feat_details.append({
-                    'text': feat[:50] + '...' if len(feat) > 50 else feat,
-                    'score': single_score,
-                    'has_user_mention': 'you' in feat.lower() or 'your' in feat.lower(),
-                    'has_differentiation': any(w in feat.lower() for w in ['unique','different','exclusive','only','best']),
-                    'coverage': cov_result['coverage'],
-                    'coverage_score': cov_result['total_score']
-                })
+                    info_hit = check_info_points(feat, language='de')
+                    info_score = (sum(info_hit.values()) / len(info_hit)) * 100
+                    feat_details.append({
+                        'text': feat[:50] + '...' if len(feat) > 50 else feat,
+                        'score': single_score,
+                        'has_user_mention': has_user_mention,
+                        'has_differentiation': has_differentiation,
+                        'coverage': cov_result['coverage'],
+                        'coverage_score': cov_result['total_score'],
+                        'info_hit': info_hit,
+                        'info_score': round(info_score, 2)
+                    })
                 feat_avg = sum(feat_scores) / len(feat_scores) if feat_scores else 0
             else:
                 feat_avg = 0
@@ -1094,6 +1200,16 @@ if uploaded_file is not None:
                             "🏷️ **建议在标题开头加入品牌名或强度词**（如 Premium, Professional），提升品质感。")
             else:
                 title_advice.append("✅ 标题得分较高，继续保持。")
+            # 检查标题信息点缺失
+            info_hit_title = title_details.get('hit', {})
+            missing_info_title = [dim for dim, val in info_hit_title.items() if val == 0]
+            if missing_info_title:
+                info_dim_map = {
+                    'material': '材质', 'color': '颜色', 'size': '尺寸/规格',
+                    'function': '功能', 'scenario': '使用场景'
+                }
+                missing_desc = ', '.join([info_dim_map.get(m, m) for m in missing_info_title])
+                title_advice.append(f"📋 **标题缺少信息点**：{missing_desc}，建议补充这些关键词以提升搜索覆盖。")
 
             # 4b. 五点描述具体建议
             feat_advice = []
@@ -1118,22 +1234,31 @@ if uploaded_file is not None:
                             issues.append("描述过短")
                         # 5. 信息覆盖度缺失
                         coverage = detail.get('coverage', {})
-                        missing = [dim for dim, val in coverage.items() if val == 0]
-                        if missing:
-                            dim_map = {
-                                'size': '尺寸/规格',
-                                'material': '材质',
-                                'warranty': '保修/售后',
-                                'usage': '使用场景',
-                                'differentiation': '差异化优势',
-                                'user_oriented': '用户导向'
-                            }
-                            missing_desc = ', '.join([dim_map.get(m, m) for m in missing])
-                            issues.append(f"缺少信息：{missing_desc}")
-                        
+                        # 合并覆盖度缺失 + 具体信息点缺失
+                        missing = [dim for dim, val in detail.get('coverage', {}).items() if val == 0]
+                        info_hit = detail.get('info_hit', {})
+                        missing_info = [dim for dim, val in info_hit.items() if val == 0]
+
+                        # 统一映射表
+                        dim_map = {
+                            'size': '尺寸/规格',
+                            'material': '材质',
+                            'warranty': '保修/售后',
+                            'usage': '使用场景',
+                            'differentiation': '差异化优势',
+                            'user_oriented': '用户导向',
+                            'color': '颜色',
+                            'function': '功能',
+                            'scenario': '使用场景'
+                        }
+                        # 合并去重
+                        all_missing = set(missing) | set(missing_info)
+                        if all_missing:
+                            missing_desc = ', '.join([dim_map.get(m, m) for m in all_missing])
+                            issues.append(f"缺少信息维度：{missing_desc}")
                         if issues:
                             feat_advice.append(
-                                f"📌 第 {i+1} 条（{detail['text']}）：{'；'.join(issues)}。"
+                                f"📌 第 {i + 1} 条（{detail['text']}）：{'；'.join(issues)}。"
                             )
                             # 给出具体优化方向
                             if "得分较低" in issues:
@@ -1192,7 +1317,7 @@ if uploaded_file is not None:
             if vid_s < avg_vals['视频得分'] - 5:
                 other_advice.append("🎬 **视频得分偏低**：缺少产品视频，建议制作 1-2 个使用演示或介绍视频。")
 
-           # 汇总所有建议
+            # 汇总所有建议
             all_advice = title_advice + feat_advice + img_advice + other_advice
             if not all_advice or all(a.startswith("✅") for a in all_advice):
                 st.success("🎉 新品各项指标均优于或接近数据集平均水平，竞争力较强！")
