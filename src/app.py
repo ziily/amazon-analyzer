@@ -1096,7 +1096,7 @@ if uploaded_file is not None:
                 title_advice.append("✅ 标题得分较高，继续保持。")
 
             # 4b. 五点描述具体建议
-                       feat_advice = []
+            feat_advice = []
             if feat_avg < avg_vals['五点描述得分'] - 5:
                 if not features_list:
                     feat_advice.append("❌ **五点描述为空**，请至少填写 3-5 条卖点。")
