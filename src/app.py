@@ -720,6 +720,92 @@ def calculate_consumer_score(features, image_type):
 
 
 @st.cache_data(show_spinner=False, ttl=3600 * 24)
+def analyze_uploaded_images_with_clip(uploaded_image_bytes_list, image_types_list):
+    """对用户上传的新品图片做 CLIP 深度分析
+    Args:
+        uploaded_image_bytes_list: list of bytes (Streamlit UploadedFile.getvalue())
+        image_types_list: list of str, 每张图的角色
+                          - 'main' (主图/缩略图)
+                          - 'detail' (高分辨率细节图)
+                          - 'lifestyle' (场景图，按高分辨率权重算)
+                          - 'aplus' (A+ 图)
+    Returns:
+        dict: 包含每张图的特征分 + 整体聚合分
+    """
+    import torch
+    if not uploaded_image_bytes_list:
+        return {}
+
+    model, processor = load_clip()
+
+    per_image_results = []
+    for img_bytes, img_type in zip(uploaded_image_bytes_list, image_types_list):
+        try:
+            img = Image.open(BytesIO(img_bytes)).convert("RGB")
+        except Exception as e:
+            print(f"⚠️ 上传图片打开失败: {e}")
+            continue
+
+        try:
+            inputs = processor(text=TEXT_PROMPTS, images=img, return_tensors="pt", padding=True)
+            with torch.no_grad():
+                outputs = model(**inputs)
+            logits = outputs.logits_per_image[0]
+            positive = logits[:-1]
+            baseline = logits[-1]
+            scores_arr = torch.sigmoid(positive - baseline)
+            features = {name: float(scores_arr[i]) for i, name in enumerate(FEATURE_NAMES)}
+            # 映射类型到 calculate_consumer_score 用的 image_type
+            consumer_type = {
+                'main': 'thumbnail',
+                'detail': 'high_resolution',
+                'lifestyle': 'high_resolution',
+                'aplus': 'a_plus',
+            }.get(img_type, 'high_resolution')
+            consumer = calculate_consumer_score(features, consumer_type)
+            per_image_results.append({
+                'image_type': img_type,
+                'consumer_score': consumer,
+                'features': features,
+            })
+        except Exception as e:
+            print(f"⚠️ CLIP 推理失败: {e}")
+            continue
+
+    if not per_image_results:
+        return {}
+
+    # 聚合：每张图都参与，主图权重高
+    type_weights = {'main': 0.40, 'detail': 0.30, 'lifestyle': 0.20, 'aplus': 0.10}
+    total_weight = sum(type_weights.get(r['image_type'], 0.1) for r in per_image_results)
+    weighted_score = sum(r['consumer_score'] * type_weights.get(r['image_type'], 0.1)
+                         for r in per_image_results) / total_weight if total_weight > 0 else 0
+
+    # 各心理维度平均
+    dim_avgs = {}
+    for dim in FEATURE_NAMES:
+        vals = [r['features'].get(dim, 0) * 100 for r in per_image_results]
+        dim_avgs[dim] = sum(vals) / len(vals) if vals else 0
+
+    # 各图类型平均分
+    type_scores = {}
+    for t in ['main', 'detail', 'lifestyle', 'aplus']:
+        sub = [r for r in per_image_results if r['image_type'] == t]
+        type_scores[t] = {
+            'score': sum(r['consumer_score'] for r in sub) / len(sub) if sub else 0,
+            'count': len(sub)
+        }
+
+    return {
+        'overall_score': round(weighted_score, 2),
+        'per_image': per_image_results,
+        'dim_avgs': dim_avgs,
+        'type_scores': type_scores,
+        'image_count': len(per_image_results),
+    }
+
+
+@st.cache_data(show_spinner=False, ttl=3600 * 24)
 def deep_analyze_asin_images(_listing, _search_item, max_images=3):
     """对单个 ASIN 的图片做 CLIP 深度分析（带缓存）
     注意: _listing 和 _search_item 前缀下划线告诉 Streamlit 不要 hash 它们的内容
@@ -861,8 +947,13 @@ def find_top_competitors(full_df, new_title, new_price, top_n=3):
 
 def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
                               new_features, has_aplus, has_brandstory,
-                              video_count, full_df, classifier_text2score=None):
-    """智能新品分析：基于分位数 + 真实竞品对比"""
+                              video_count, full_df, classifier_text2score=None,
+                              image_analysis_result=None):
+    """智能新品分析：基于分位数 + 真实竞品对比
+    Args:
+        image_analysis_result: dict, 由 analyze_uploaded_images_with_clip 返回。
+                               None 表示用户未上传图片，用数据集中位数。
+    """
     # ===== 计算数据集分位数基准 =====
     qs = (0.25, 0.5, 0.75)
     benchmarks = {
@@ -930,8 +1021,13 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
     aplus_score = 50 if has_aplus else 0
     brand_bonus = 10 if has_brandstory else 0
 
-    # 图片：未上传时用数据集 P50 作为预期
-    img_avg = benchmarks['image_score'][0.5]
+    # 图片：如果上传了图片，用真实 CLIP 分析结果；否则用数据集 P50
+    if image_analysis_result and image_analysis_result.get('overall_score') is not None:
+        img_avg = image_analysis_result['overall_score']
+        img_source = 'uploaded'  # 标记来源，给建议用
+    else:
+        img_avg = benchmarks['image_score'][0.5]
+        img_source = 'estimated'
 
     # 属性等用 P50
     attr_s = benchmarks.get('attributes_score', {0.5: 50})[0.5] if 'attributes_score' in benchmarks else 50
@@ -990,7 +1086,9 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
         new_title, new_features, features_list, feat_details, title_details,
         title_score_val, price_score, trust_score_val, feat_avg, vid_s, aplus_score,
         has_aplus, has_brandstory, video_count, new_stars, new_reviews,
-        benchmarks, competitors
+        benchmarks, competitors,
+        img_avg=img_avg, img_source=img_source,
+        image_analysis_result=image_analysis_result
     )
 
     return {
@@ -1012,6 +1110,8 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
         },
         'feat_details': feat_details,
         'title_details': title_details,
+        'image_analysis': image_analysis_result,
+        'img_source': img_source,
     }
 
 
@@ -1031,8 +1131,13 @@ def _quantile_position(val, q_dict):
 def _generate_smart_advice(new_title, new_features, features_list, feat_details,
                            title_details, title_score_val, price_score, trust_score_val,
                            feat_avg, vid_s, aplus_score, has_aplus, has_brandstory,
-                           video_count, new_stars, new_reviews, benchmarks, competitors):
-    """根据实际差距动态生成建议，避免千篇一律"""
+                           video_count, new_stars, new_reviews, benchmarks, competitors,
+                           img_avg=None, img_source='estimated', image_analysis_result=None):
+    """根据实际差距动态生成建议，避免千篇一律
+    Args:
+        img_source: 'uploaded' 用真实CLIP分析；'estimated' 用数据集中位数
+        image_analysis_result: 上传图片时的 CLIP 分析结果字典
+    """
     advice = []
 
     # ===== 1. 标题建议 =====
@@ -1142,6 +1247,78 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
         advice.append(("🟠", "A+ 内容", "未启用 A+ 内容，建议品牌备案后开通，加入品牌故事、对比模块、Q&A 模块"))
     else:
         advice.append(("🟢", "A+ 内容", "已启用 A+ 内容，建议加入竞品对比表和场景应用模块"))
+
+    # ===== 6.5 图片建议（基于真实 CLIP 分析或预估） =====
+    img_q = benchmarks['image_score']
+    if img_source == 'uploaded' and image_analysis_result:
+        # 用 CLIP 真实结果生成具体建议
+        overall = image_analysis_result.get('overall_score', 0)
+        dim_avgs = image_analysis_result.get('dim_avgs', {})
+        type_scores = image_analysis_result.get('type_scores', {})
+        img_count = image_analysis_result.get('image_count', 0)
+
+        if overall < img_q[0.25]:
+            advice.append(("🔴", "图片",
+                          f"图片综合得分 {overall:.1f}（{img_count} 张已分析），处于后 25%。具体诊断："))
+        elif overall < img_q[0.5]:
+            advice.append(("🟠", "图片",
+                          f"图片综合得分 {overall:.1f}（{img_count} 张已分析），低于中位水平。具体诊断："))
+        elif overall < img_q[0.75]:
+            advice.append(("🟡", "图片",
+                          f"图片综合得分 {overall:.1f}（{img_count} 张已分析），中上水平，仍有提升空间："))
+        else:
+            advice.append(("🟢", "图片",
+                          f"图片综合得分 {overall:.1f}（{img_count} 张已分析），前 25%，保持"))
+
+        # 维度细分：6 个核心心理维度
+        dim_thresholds = [
+            ('attention', '注意力', 55, '主图不够抓眼，建议：白底高清+产品占图 85%+45度角'),
+            ('trust_signal', '信任感', 55, '信任感不足，建议：增加专业拍摄+品牌 LOGO 角标'),
+            ('quality_perception', '品质感', 55, '品质感弱，建议：提升光线+特写材质纹理'),
+            ('value_perception', '价值感', 50, '价值感不强，建议：增加功能标注图/赠品展示'),
+            ('usage_imagination', '使用场景', 50, '缺场景图，建议：至少 1 张生活场景图，让用户想象使用'),
+            ('risk_reduction', '风险消除', 50, '风险信号弱，建议：增加尺寸标注图/功能拆解图'),
+            ('differentiation', '差异化', 50, '差异化不足，建议：增加竞品对比图或独家设计展示'),
+        ]
+        weak_dims = []
+        for dim_key, dim_name, threshold, suggestion in dim_thresholds:
+            val = dim_avgs.get(dim_key, 0) * 100
+            if val < threshold:
+                weak_dims.append((dim_name, val, suggestion))
+        if weak_dims:
+            for dim_name, val, suggestion in weak_dims[:4]:  # 最多列 4 个
+                advice.append(("📌", f"  图片·{dim_name}", f"{val:.1f}/100。{suggestion}"))
+
+        # 图片类型结构建议
+        main_info = type_scores.get('main', {})
+        detail_info = type_scores.get('detail', {})
+        lifestyle_info = type_scores.get('lifestyle', {})
+        aplus_info = type_scores.get('aplus', {})
+
+        struct_issues = []
+        if main_info.get('count', 0) == 0:
+            struct_issues.append("缺少主图（白底图），Amazon 必备")
+        if detail_info.get('count', 0) == 0:
+            struct_issues.append("缺少细节图，建议 2-3 张不同角度/材质特写")
+        if lifestyle_info.get('count', 0) == 0:
+            struct_issues.append("缺少场景图，建议 1-2 张使用场景照")
+        if aplus_info.get('count', 0) == 0 and has_aplus:
+            struct_issues.append("已勾选 A+ 但未上传 A+ 图，建议补充")
+        if struct_issues:
+            advice.append(("📌", "  图片·结构", "；".join(struct_issues)))
+
+        # 主图特别诊断（最重要的图）
+        if main_info.get('count', 0) > 0:
+            main_score = main_info['score']
+            if main_score < 60:
+                advice.append(("📌", "  图片·主图",
+                              f"主图得分 {main_score:.1f}（这是搜索结果页第一印象，最关键）。"
+                              "建议：纯白背景（RGB 255,255,255）、产品占比 85%、无水印无文字"))
+    else:
+        # 未上传图片：用数据集中位数，给结构性建议
+        advice.append(("ℹ️", "图片",
+                      f"未上传图片，图片维度用数据集中位数 {img_q[0.5]:.1f} 作为预估。"
+                      "建议上传主图（白底）+ 2-3 张细节图 + 1 张场景图，可获得基于 CLIP 的真实图片诊断"))
 
     # ===== 7. 竞品对比建议 =====
     if not competitors.empty:
@@ -1422,17 +1599,84 @@ if uploaded_file is not None:
             has_brandstory = st.checkbox("是否有品牌故事")
             video_count = st.selectbox("视频数量", [0, 1, 2, 3, 5], index=0)
 
+        # ===== 新增：图片上传 =====
+        st.markdown("**🖼️ 上传产品图片（可选，上传后启用 CLIP 真实图片诊断）**")
+        st.caption("建议上传：1 张主图（白底）+ 2-3 张细节图 + 1 张场景图，最多 6 张。"
+                   "首次分析需加载 CLIP 模型（约 30 秒），之后每张图 1-2 秒。")
+
+        uploaded_images = st.file_uploader(
+            "选择图片（支持 jpg/png/webp）",
+            type=['jpg', 'jpeg', 'png', 'webp'],
+            accept_multiple_files=True,
+            key="new_product_images"
+        )
+        if uploaded_images and len(uploaded_images) > 6:
+            st.warning("⚠️ 最多分析 6 张图片，已自动截取前 6 张")
+            uploaded_images = uploaded_images[:6]
+
+        # 为每张上传的图片选择类型
+        image_types_list = []
+        if uploaded_images:
+            st.markdown("**为每张图片指定角色**（影响 CLIP 评分权重）")
+            type_cols = st.columns(min(len(uploaded_images), 3))
+            for i, img_file in enumerate(uploaded_images):
+                with type_cols[i % 3]:
+                    default_type = 'main' if i == 0 else ('detail' if i <= 3 else 'lifestyle')
+                    img_type = st.selectbox(
+                        f"图 {i+1}: {img_file.name[:25]}",
+                        options=['main', 'detail', 'lifestyle', 'aplus'],
+                        format_func=lambda x: {
+                            'main': '主图（白底）',
+                            'detail': '细节图（多角度/材质）',
+                            'lifestyle': '场景图（使用场景）',
+                            'aplus': 'A+ 图（品牌/对比）'
+                        }[x],
+                        index=['main', 'detail', 'lifestyle', 'aplus'].index(default_type),
+                        key=f"img_type_{i}"
+                    )
+                    image_types_list.append(img_type)
+
+            # 缩略图预览
+            st.markdown("**图片预览**")
+            preview_cols = st.columns(min(len(uploaded_images), 6))
+            for i, img_file in enumerate(uploaded_images):
+                with preview_cols[i]:
+                    try:
+                        img = Image.open(img_file)
+                        st.image(img, caption=f"{image_types_list[i]}", width=100)
+                    except Exception:
+                        st.warning(f"图 {i+1} 预览失败")
+
         submitted = st.form_submit_button("📊 分析新品竞争力", type="primary")
 
     if submitted:
         if final_df.empty:
             st.warning("当前没有可对比的数据集，请先上传 JSON 文件。")
         else:
+            # ===== 第一步：如果有上传图片，先跑 CLIP 分析 =====
+            image_analysis_result = None
+            if uploaded_images:
+                with st.spinner("🖼️ 加载 CLIP 模型并分析上传图片（首次约 30 秒，之后每张 1-2 秒）..."):
+                    try:
+                        # 把 UploadedFile 转成 bytes（用于 @st.cache_data 哈希）
+                        img_bytes_list = [f.getvalue() for f in uploaded_images]
+                        image_analysis_result = analyze_uploaded_images_with_clip(
+                            tuple(img_bytes_list),  # tuple 可哈希
+                            tuple(image_types_list)
+                        )
+                        if image_analysis_result:
+                            st.success(f"✅ 图片分析完成，综合得分 {image_analysis_result['overall_score']:.1f}")
+                    except Exception as e:
+                        st.warning(f"图片分析失败（图片维度将用数据集中位数估算）: {e}")
+                        image_analysis_result = None
+
+            # ===== 第二步：智能新品分析 =====
             with st.spinner("智能分析中..."):
                 result = analyze_new_product_smart(
                     new_title, new_price, new_stars, new_reviews,
                     new_features, has_aplus, has_brandstory,
-                    video_count, full_df
+                    video_count, full_df,
+                    image_analysis_result=image_analysis_result
                 )
 
             # 对比表
@@ -1461,12 +1705,99 @@ if uploaded_file is not None:
                 for icon, dim, text in result['advice']:
                     color = {"🟢": "green", "🟡": "#888", "🟠": "#FF8C00",
                              "🔴": "red", "❌": "red", "🎯": "#0066CC",
-                             "📌": "#663399", "📋": "#444"}.get(icon, "#333")
+                             "📌": "#663399", "📋": "#444", "ℹ️": "#666"}.get(icon, "#333")
                     st.markdown(
                         f"<div style='padding:8px 12px;margin:4px 0;border-left:3px solid {color};"
                         f"background:#f9f9f9;'><strong>{icon} {dim}</strong>：{text}</div>",
                         unsafe_allow_html=True
                     )
+
+            # ===== 图片深度分析明细 =====
+            if result.get('img_source') == 'uploaded' and result.get('image_analysis'):
+                st.subheader("🖼️ 图片深度分析明细")
+                img_res = result['image_analysis']
+
+                # 顶部 4 个核心指标
+                img_metric_cols = st.columns(4)
+                metrics = [
+                    ("综合得分", img_res['overall_score']),
+                    ("图片数量", img_res['image_count']),
+                    ("主图得分", img_res['type_scores'].get('main', {}).get('score', 0)),
+                    ("细节图均分", img_res['type_scores'].get('detail', {}).get('score', 0)),
+                ]
+                for i, (name, val) in enumerate(metrics):
+                    with img_metric_cols[i]:
+                        if name == "图片数量":
+                            st.metric(name, f"{int(val)}")
+                        else:
+                            st.metric(name, f"{val:.1f}")
+
+                # 各类型图片得分
+                st.markdown("**各类型图片得分**")
+                type_data = []
+                type_name_map = {'main': '主图', 'detail': '细节图', 'lifestyle': '场景图', 'aplus': 'A+图'}
+                for t, info in img_res['type_scores'].items():
+                    if info['count'] > 0:
+                        type_data.append({
+                            '类型': type_name_map.get(t, t),
+                            '数量': info['count'],
+                            '平均得分': round(info['score'], 2),
+                        })
+                if type_data:
+                    st.dataframe(pd.DataFrame(type_data), hide_index=True, use_container_width=True)
+
+                # 9 个心理维度雷达图
+                st.markdown("**9 维度 CLIP 心理感知得分**")
+                dim_zh_map = {
+                    'attention': '注意力',
+                    'product_understanding': '产品理解',
+                    'value_perception': '价值感知',
+                    'usage_imagination': '使用想象',
+                    'trust_signal': '信任信号',
+                    'risk_reduction': '风险消除',
+                    'quality_perception': '品质感知',
+                    'differentiation': '差异化',
+                    'purchase_intent': '购买意愿',
+                }
+                dim_names = [dim_zh_map[d] for d in FEATURE_NAMES]
+                dim_vals = [img_res['dim_avgs'].get(d, 0) * 100 for d in FEATURE_NAMES]
+                # 添加数据集基准（如果有）
+                # 这里用 50 作为基线
+                dim_baseline = [50] * len(FEATURE_NAMES)
+
+                fig_img = go.Figure()
+                fig_img.add_trace(go.Scatterpolar(
+                    r=dim_vals, theta=dim_names, fill='toself', name='新品图片'
+                ))
+                fig_img.add_trace(go.Scatterpolar(
+                    r=dim_baseline, theta=dim_names, fill='toself', name='基线 (50)',
+                    line=dict(dash='dot', color='gray')
+                ))
+                fig_img.update_layout(
+                    polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                    showlegend=True, height=450
+                )
+                st.plotly_chart(fig_img, use_container_width=True)
+
+                # 每张图独立得分
+                if img_res.get('per_image'):
+                    st.markdown("**每张图片独立得分**")
+                    per_img_data = []
+                    type_name_map_full = {'main': '主图', 'detail': '细节图',
+                                          'lifestyle': '场景图', 'aplus': 'A+图'}
+                    for i, r in enumerate(img_res['per_image']):
+                        row = {
+                            '图片序号': i + 1,
+                            '类型': type_name_map_full.get(r['image_type'], r['image_type']),
+                            '消费者得分': round(r['consumer_score'], 2),
+                            '注意力': round(r['features'].get('attention', 0) * 100, 1),
+                            '信任': round(r['features'].get('trust_signal', 0) * 100, 1),
+                            '品质': round(r['features'].get('quality_perception', 0) * 100, 1),
+                            '价值': round(r['features'].get('value_perception', 0) * 100, 1),
+                            '场景': round(r['features'].get('usage_imagination', 0) * 100, 1),
+                        }
+                        per_img_data.append(row)
+                    st.dataframe(pd.DataFrame(per_img_data), hide_index=True, use_container_width=True)
 
             # 雷达图
             st.subheader("📊 核心维度雷达图")
