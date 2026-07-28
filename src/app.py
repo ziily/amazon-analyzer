@@ -758,27 +758,13 @@ def analyze_uploaded_images_with_clip(uploaded_image_bytes_list, image_types_lis
             continue
 
         try:
-            # 1. 先单独提取 embedding（用 processor 处理图片，再用 get_image_features）
-            img_inputs = processor(images=img, return_tensors="pt")
-            pixel_values = img_inputs.get('pixel_values')
-            if pixel_values is None:
-                print(f"⚠️ 图 {idx}: processor 没返回 pixel_values")
-                continue
-
-            with torch.no_grad():
-                img_emb = model.get_image_features(pixel_values=pixel_values)
-                img_emb = img_emb / img_emb.norm(dim=-1, keepdim=True)  # L2 归一化
-                img_emb_np = img_emb[0].cpu().numpy()
-
-            # 如果是主图，保存 embedding
-            if idx == main_image_index:
-                main_image_embedding = img_emb_np
-                print(f"✅ 主图 embedding 提取成功，维度 = {img_emb_np.shape}")
-
-            # 2. 用 text+image 一起做 zero-shot 分类（用于心理评分）
+            # 一次推理同时拿到 zero-shot 分类分 + image embedding
+            # 用 text+image 一起输入，model(**inputs) 返回的 outputs 包含 image_embeds
             inputs = processor(text=TEXT_PROMPTS, images=img, return_tensors="pt", padding=True)
             with torch.no_grad():
                 outputs = model(**inputs)
+
+            # === 1. 提取 zero-shot 心理评分 ===
             logits = outputs.logits_per_image[0]
             positive = logits[:-1]
             baseline = logits[-1]
@@ -796,6 +782,17 @@ def analyze_uploaded_images_with_clip(uploaded_image_bytes_list, image_types_lis
                 'consumer_score': consumer,
                 'features': features,
             })
+
+            # === 2. 直接从 outputs.image_embeds 拿 embedding（兼容所有 transformers 版本）===
+            if idx == main_image_index:
+                img_emb_tensor = outputs.image_embeds  # 标准字段，一定是 tensor
+                if img_emb_tensor is not None and hasattr(img_emb_tensor, 'shape'):
+                    # L2 归一化
+                    img_emb_tensor = img_emb_tensor / img_emb_tensor.norm(dim=-1, keepdim=True)
+                    main_image_embedding = img_emb_tensor[0].cpu().numpy()
+                    print(f"✅ 主图 embedding 提取成功，维度 = {main_image_embedding.shape}")
+                else:
+                    print(f"⚠️ 主图 outputs.image_embeds 为空或非 tensor")
         except Exception as e:
             import traceback
             print(f"⚠️ CLIP 推理失败 (图 {idx}): {e}")
@@ -876,14 +873,14 @@ def compute_dataset_image_embeddings(thumbnail_urls_tuple):
         batch_imgs = [img for _, img in batch]
         batch_asins = [asin for asin, _ in batch]
         try:
-            inputs = processor(images=batch_imgs, return_tensors="pt", padding=True)
-            pixel_values = inputs.get('pixel_values')
-            if pixel_values is None:
-                print(f"⚠️ 批量 processor 没返回 pixel_values")
-                continue
+            # 直接用 text+image 一起输入，从 outputs.image_embeds 拿 embedding
+            # text 用一个简单 prompt 即可，主要为了能调 model() 拿到 image_embeds
+            inputs = processor(text=["a product photo"], images=batch_imgs,
+                                return_tensors="pt", padding=True)
             with torch.no_grad():
-                embs = model.get_image_features(pixel_values=pixel_values)
-                embs = embs / embs.norm(dim=-1, keepdim=True)  # L2 归一化
+                outputs = model(**inputs)
+            embs = outputs.image_embeds  # 标准字段，跨版本兼容
+            embs = embs / embs.norm(dim=-1, keepdim=True)  # L2 归一化
             for asin, emb in zip(batch_asins, embs):
                 embeddings[asin] = emb.cpu().numpy()
         except Exception as e:
