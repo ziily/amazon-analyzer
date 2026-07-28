@@ -723,14 +723,14 @@ def calculate_consumer_score(features, image_type):
 def analyze_uploaded_images_with_clip(uploaded_image_bytes_list, image_types_list):
     """对用户上传的新品图片做 CLIP 深度分析
     Args:
-        uploaded_image_bytes_list: list of bytes (Streamlit UploadedFile.getvalue())
-        image_types_list: list of str, 每张图的角色
+        uploaded_image_bytes_list: tuple of bytes (Streamlit UploadedFile.getvalue())
+        image_types_list: tuple of str, 每张图的角色
                           - 'main' (主图/缩略图)
                           - 'detail' (高分辨率细节图)
                           - 'lifestyle' (场景图，按高分辨率权重算)
                           - 'aplus' (A+ 图)
     Returns:
-        dict: 包含每张图的特征分 + 整体聚合分
+        dict: 包含每张图的特征分 + 整体聚合分 + 主图 embedding（用于找视觉相似竞品）
     """
     import torch
     if not uploaded_image_bytes_list:
@@ -739,6 +739,7 @@ def analyze_uploaded_images_with_clip(uploaded_image_bytes_list, image_types_lis
     model, processor = load_clip()
 
     per_image_results = []
+    main_image_embedding = None  # 保存主图 embedding 用于视觉相似度
     for img_bytes, img_type in zip(uploaded_image_bytes_list, image_types_list):
         try:
             img = Image.open(BytesIO(img_bytes)).convert("RGB")
@@ -768,6 +769,12 @@ def analyze_uploaded_images_with_clip(uploaded_image_bytes_list, image_types_lis
                 'consumer_score': consumer,
                 'features': features,
             })
+            # 提取主图 embedding 用于视觉相似度匹配
+            if img_type == 'main' and main_image_embedding is None:
+                with torch.no_grad():
+                    img_emb = model.get_image_features(**{k: v for k, v in inputs.items() if k in ['pixel_values']})
+                    img_emb = img_emb / img_emb.norm(dim=-1, keepdim=True)  # L2 归一化
+                    main_image_embedding = img_emb[0].cpu().numpy()
         except Exception as e:
             print(f"⚠️ CLIP 推理失败: {e}")
             continue
@@ -802,7 +809,61 @@ def analyze_uploaded_images_with_clip(uploaded_image_bytes_list, image_types_lis
         'dim_avgs': dim_avgs,
         'type_scores': type_scores,
         'image_count': len(per_image_results),
+        'main_image_embedding': main_image_embedding,  # 用于视觉相似度匹配
     }
+
+
+@st.cache_data(show_spinner="🖼️ 计算数据集图片向量中（首次约 1-3 分钟，之后秒级）", ttl=3600 * 24 * 7)
+def compute_dataset_image_embeddings(thumbnail_urls_tuple):
+    """批量计算数据集中所有产品主图（thumbnail）的 CLIP embedding
+    Args:
+        thumbnail_urls_tuple: tuple of (asin, url)，必须可哈希
+    Returns:
+        dict: {asin: embedding (numpy array, L2 normalized)}
+    """
+    import torch
+    if not thumbnail_urls_tuple:
+        return {}
+
+    model, processor = load_clip()
+    embeddings = {}
+
+    # 并发下载 + 串行推理（推理必须串行，下载可并发）
+    def _download(url):
+        try:
+            resp = requests.get(url, timeout=10)
+            return Image.open(BytesIO(resp.content)).convert("RGB")
+        except Exception:
+            return None
+
+    urls = [u for _, u in thumbnail_urls_tuple]
+    with ThreadPoolExecutor(max_workers=CONFIG["image_download_workers"]) as executor:
+        images = list(executor.map(_download, urls))
+
+    # 批量推理（一次处理多张图，比逐张快很多）
+    batch_size = 8
+    valid_records = [(asin, img) for (asin, _), img in zip(thumbnail_urls_tuple, images) if img is not None]
+    print(f"🖼️ 数据集图片：{len(thumbnail_urls_tuple)} 个 ASIN，{len(valid_records)} 张下载成功")
+
+    for i in range(0, len(valid_records), batch_size):
+        batch = valid_records[i:i + batch_size]
+        batch_imgs = [img for _, img in batch]
+        batch_asins = [asin for asin, _ in batch]
+        try:
+            inputs = processor(images=batch_imgs, return_tensors="pt", padding=True)
+            with torch.no_grad():
+                embs = model.get_image_features(**inputs)
+                embs = embs / embs.norm(dim=-1, keepdim=True)  # L2 归一化
+            for asin, emb in zip(batch_asins, embs):
+                embeddings[asin] = emb.cpu().numpy()
+        except Exception as e:
+            print(f"⚠️ 批量 embedding 失败: {e}")
+            continue
+        if (i + batch_size) % 32 == 0:
+            print(f"  embedding 进度 {i + len(batch)}/{len(valid_records)}")
+
+    print(f"✅ 数据集图片 embedding 完成，{len(embeddings)}/{len(thumbnail_urls_tuple)}")
+    return embeddings
 
 
 @st.cache_data(show_spinner=False, ttl=3600 * 24)
@@ -908,28 +969,37 @@ def compute_quantiles(series, qs=(0.25, 0.5, 0.75)):
     return {q: float(s.quantile(q)) for q in qs}
 
 
-def find_top_competitors(full_df, new_title, new_price, top_n=3):
-    """根据标题相似度+价格接近度找出最相似的 N 个竞品"""
-    if full_df.empty or not new_title:
-        return full_df.head(top_n)
-
-    # 简单词集合相似度（Jaccard）
-    new_words = set(re.findall(r'\w+', new_title.lower()))
-    if not new_words:
-        return full_df.head(top_n)
-
-    def jaccard(title):
-        if not title or not isinstance(title, str):
-            return 0
-        words = set(re.findall(r'\w+', title.lower()))
-        if not words:
-            return 0
-        return len(new_words & words) / len(new_words | words)
+def find_top_competitors(full_df, new_title, new_price, top_n=3,
+                         new_image_embedding=None, dataset_embeddings=None,
+                         image_weight=0.45, title_weight=0.35, price_weight=0.20):
+    """根据标题相似度 + 价格接近度 + 图片视觉相似度找出最相似的 N 个竞品
+    Args:
+        new_image_embedding: numpy array, 新品主图的 CLIP embedding（L2 归一化）
+        dataset_embeddings: dict {asin: embedding}, 数据集所有产品的 embedding
+        image_weight: 图片相似度权重（仅当 new_image_embedding 和 dataset_embeddings 都有值时生效）
+        title_weight: 标题相似度权重
+        price_weight: 价格接近度权重
+    """
+    if full_df.empty:
+        return full_df.head(top_n), pd.DataFrame()
 
     df = full_df.copy()
-    df['title_sim'] = df['title'].apply(jaccard) if 'title' in df.columns else 0
 
-    # 价格接近度（0-1，越接近 1）
+    # 1. 标题相似度（Jaccard）
+    if new_title:
+        new_words = set(re.findall(r'\w+', new_title.lower()))
+        def jaccard(title):
+            if not title or not isinstance(title, str):
+                return 0
+            words = set(re.findall(r'\w+', title.lower()))
+            if not words:
+                return 0
+            return len(new_words & words) / len(new_words | words)
+        df['title_sim'] = df['title'].apply(jaccard) if 'title' in df.columns else 0
+    else:
+        df['title_sim'] = 0
+
+    # 2. 价格接近度
     if new_price and 'price_value' in df.columns:
         prices = df['price_value'].dropna()
         if len(prices) > 0:
@@ -940,19 +1010,61 @@ def find_top_competitors(full_df, new_title, new_price, top_n=3):
     else:
         df['price_sim'] = 0.5
 
-    # 综合相似度：标题 0.7 + 价格 0.3
-    df['sim'] = df['title_sim'] * 0.7 + df['price_sim'] * 0.3
-    return df.nlargest(top_n, 'sim')
+    # 3. 图片视觉相似度（如果新品和数据集都有 embedding）
+    has_image_sim = (new_image_embedding is not None and
+                     dataset_embeddings and
+                     len(dataset_embeddings) > 0)
+    if has_image_sim:
+        import numpy as np
+        def _cosine_sim(asin):
+            emb = dataset_embeddings.get(asin)
+            if emb is None:
+                return None
+            # 两者都已 L2 归一化，点积 = 余弦相似度
+            return float(np.dot(new_image_embedding, emb))
+
+        df['image_sim'] = df['asin'].apply(_cosine_sim)
+        # 缺失的图片相似度用中位数填充（避免拉低排名）
+        valid_sims = df['image_sim'].dropna()
+        fill_val = valid_sims.median() if len(valid_sims) > 0 else 0.5
+        df['image_sim'] = df['image_sim'].fillna(fill_val)
+
+        # 综合相似度：标题 + 价格 + 图片
+        df['sim'] = (df['title_sim'] * title_weight +
+                     df['price_sim'] * price_weight +
+                     df['image_sim'] * image_weight)
+        df['sim_breakdown'] = df.apply(
+            lambda r: f"标题 {r['title_sim']:.2f} · 价格 {r['price_sim']:.2f} · 图片 {r['image_sim']:.2f}",
+            axis=1
+        )
+    else:
+        # 没有图片 embedding，退化为标题+价格
+        df['image_sim'] = None
+        # 重新归一化权重
+        total = title_weight + price_weight
+        df['sim'] = (df['title_sim'] * (title_weight / total) +
+                     df['price_sim'] * (price_weight / total))
+        df['sim_breakdown'] = df.apply(
+            lambda r: f"标题 {r['title_sim']:.2f} · 价格 {r['price_sim']:.2f}",
+            axis=1
+        )
+
+    top = df.nlargest(top_n, 'sim')
+    return top, df
 
 
 def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
                               new_features, has_aplus, has_brandstory,
                               video_count, full_df, classifier_text2score=None,
-                              image_analysis_result=None):
+                              image_analysis_result=None,
+                              dataset_image_embeddings=None,
+                              thumbnail_urls_map=None):
     """智能新品分析：基于分位数 + 真实竞品对比
     Args:
         image_analysis_result: dict, 由 analyze_uploaded_images_with_clip 返回。
                                None 表示用户未上传图片，用数据集中位数。
+        dataset_image_embeddings: dict {asin: embedding}, 数据集所有 thumbnail 的 CLIP embedding
+        thumbnail_urls_map: dict {asin: thumbnail_url}, 用于在 UI 中显示竞品图片
     """
     # ===== 计算数据集分位数基准 =====
     qs = (0.25, 0.5, 0.75)
@@ -1051,8 +1163,13 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
     detail_conversion = 0.6 * listing_score + 0.4 * conv_score
     total_score = 0.5 * search_score + 0.5 * detail_conversion
 
-    # ===== 找出最相似竞品 =====
-    competitors = find_top_competitors(full_df, new_title or "", new_price, top_n=3)
+    # ===== 找出最相似竞品（标题+价格+图片视觉相似度） =====
+    new_img_emb = (image_analysis_result or {}).get('main_image_embedding')
+    competitors, all_ranked = find_top_competitors(
+        full_df, new_title or "", new_price, top_n=3,
+        new_image_embedding=new_img_emb,
+        dataset_embeddings=dataset_image_embeddings
+    )
 
     # ===== 构造对比表 =====
     dim_rows = [
@@ -1112,6 +1229,9 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
         'title_details': title_details,
         'image_analysis': image_analysis_result,
         'img_source': img_source,
+        'competitors': competitors,
+        'all_ranked': all_ranked,  # 全部产品的相似度排名（用于显示 Top10）
+        'has_image_sim': new_img_emb is not None and bool(dataset_image_embeddings),
     }
 
 
@@ -1655,6 +1775,9 @@ if uploaded_file is not None:
         else:
             # ===== 第一步：如果有上传图片，先跑 CLIP 分析 =====
             image_analysis_result = None
+            dataset_image_embeddings = None
+            thumbnail_urls_map = None
+
             if uploaded_images:
                 with st.spinner("🖼️ 加载 CLIP 模型并分析上传图片（首次约 30 秒，之后每张 1-2 秒）..."):
                     try:
@@ -1670,13 +1793,39 @@ if uploaded_file is not None:
                         st.warning(f"图片分析失败（图片维度将用数据集中位数估算）: {e}")
                         image_analysis_result = None
 
+                # ===== 第一步半：如果新品图片分析成功且有主图，计算数据集 embedding 用于找视觉相似竞品 =====
+                if (image_analysis_result and
+                        image_analysis_result.get('main_image_embedding') is not None):
+                    # 提取数据集所有 thumbnail URL
+                    thumb_urls_list = []
+                    thumbnail_urls_map = {}
+                    for i, item in enumerate(classified_data["搜索页信息"]):
+                        asin = item.get("asin")
+                        url = item.get("thumbnailImage")
+                        if asin and url:
+                            thumb_urls_list.append((asin, url))
+                            thumbnail_urls_map[asin] = url
+
+                    if thumb_urls_list:
+                        with st.spinner(f"🔍 计算数据集 {len(thumb_urls_list)} 张主图的视觉向量（首次约 1-3 分钟，已计算则秒级）..."):
+                            try:
+                                dataset_image_embeddings = compute_dataset_image_embeddings(
+                                    tuple(thumb_urls_list)
+                                )
+                                st.success(f"✅ 数据集图片向量计算完成，{len(dataset_image_embeddings)} 张成功")
+                            except Exception as e:
+                                st.warning(f"数据集图片向量计算失败（将退化为标题+价格匹配）: {e}")
+                                dataset_image_embeddings = None
+
             # ===== 第二步：智能新品分析 =====
             with st.spinner("智能分析中..."):
                 result = analyze_new_product_smart(
                     new_title, new_price, new_stars, new_reviews,
                     new_features, has_aplus, has_brandstory,
                     video_count, full_df,
-                    image_analysis_result=image_analysis_result
+                    image_analysis_result=image_analysis_result,
+                    dataset_image_embeddings=dataset_image_embeddings,
+                    thumbnail_urls_map=thumbnail_urls_map
                 )
 
             # 对比表
@@ -1820,17 +1969,107 @@ if uploaded_file is not None:
                               showlegend=True, height=450)
             st.plotly_chart(fig, use_container_width=True)
 
-            # Top3 竞品详情
+            # Top3 竞品详情（含图片对比）
             if not result['competitors'].empty:
                 st.subheader("🎯 最相似的 3 个竞品")
-                comp_display = result['competitors'][['asin', 'title', 'brand', 'price_value',
-                                                       'Total_Score', 'search_score', 'listing_score']].copy()
-                comp_display['链接'] = comp_display['asin'].apply(lambda x: f'https://www.amazon.de/dp/{x}')
-                st.dataframe(comp_display, hide_index=True, use_container_width=True,
-                             column_config={
-                                 "链接": st.column_config.LinkColumn("详情页",
-                                     display_text=r'^(https://www\.amazon\.de/dp/)(.*)')
-                             })
+
+                # 如果有图片相似度，显示并排图片对比
+                if result.get('has_image_sim') and thumbnail_urls_map:
+                    st.markdown("**📸 视觉对比（新品 vs Top3 竞品）**")
+                    st.caption("基于 CLIP 视觉向量 + 标题 + 价格综合匹配，图片权重 45%")
+
+                    # 新品主图 + Top3 竞品主图并排
+                    img_compare_cols = st.columns(4)
+                    # 第 1 列：新品主图
+                    with img_compare_cols[0]:
+                        st.markdown("**🆕 新品主图**")
+                        # 找到用户上传的主图
+                        for i, img_file in enumerate(uploaded_images or []):
+                            if image_types_list[i] == 'main':
+                                try:
+                                    st.image(Image.open(img_file), use_container_width=True)
+                                except Exception:
+                                    st.warning("主图预览失败")
+                                break
+                        else:
+                            st.info("未上传主图")
+
+                    # 第 2-4 列：Top3 竞品主图
+                    for idx, (_, comp) in enumerate(result['competitors'].iterrows()):
+                        with img_compare_cols[idx + 1]:
+                            asin = comp['asin']
+                            sim_score = comp.get('sim', 0)
+                            img_sim = comp.get('image_sim')
+                            sim_label = f"相似度 {sim_score*100:.0f}%"
+                            if img_sim is not None:
+                                sim_label += f" (图 {img_sim*100:.0f}%)"
+                            st.markdown(f"**#{idx+1} {asin}**\n\n{sim_label}")
+                            url = thumbnail_urls_map.get(asin)
+                            if url:
+                                try:
+                                    st.image(url, use_container_width=True)
+                                except Exception:
+                                    st.warning("竞品图加载失败")
+                            else:
+                                st.info("无主图")
+
+                    st.markdown("")  # 空行
+
+                    # 详细对比表（带相似度分解）
+                    comp_display = result['competitors'][['asin', 'title', 'brand', 'price_value',
+                                                          'Total_Score', 'sim', 'image_sim',
+                                                          'title_sim', 'price_sim']].copy()
+                    comp_display['相似度'] = comp_display['sim'].apply(lambda x: f"{x*100:.1f}%")
+                    comp_display['图片相似'] = comp_display['image_sim'].apply(
+                        lambda x: f"{x*100:.1f}%" if x is not None and not pd.isna(x) else "—")
+                    comp_display['标题相似'] = comp_display['title_sim'].apply(lambda x: f"{x*100:.1f}%")
+                    comp_display['价格相似'] = comp_display['price_sim'].apply(lambda x: f"{x*100:.1f}%")
+                    comp_display = comp_display.drop(columns=['sim', 'image_sim', 'title_sim', 'price_sim'])
+                    comp_display = comp_display.rename(columns={
+                        'title': '标题', 'brand': '品牌', 'price_value': '价格(€)',
+                        'Total_Score': '综合分'
+                    })
+                    comp_display['链接'] = comp_display['asin'].apply(lambda x: f'https://www.amazon.de/dp/{x}')
+                    st.dataframe(comp_display, hide_index=True, use_container_width=True,
+                                 column_config={
+                                     "链接": st.column_config.LinkColumn("详情页",
+                                         display_text=r'^(https://www\.amazon\.de/dp/)(.*)')
+                                 })
+
+                    # 展示 Top 5-10 视觉相似产品（不只前 3）
+                    if result.get('all_ranked') is not None and not result['all_ranked'].empty:
+                        with st.expander(f"📊 查看视觉相似度 Top 10（点击展开）"):
+                            top10 = result['all_ranked'].head(10)[['asin', 'title', 'price_value',
+                                                                    'Total_Score', 'sim', 'image_sim']].copy()
+                            top10['排名'] = range(1, len(top10) + 1)
+                            top10['综合相似度'] = top10['sim'].apply(lambda x: f"{x*100:.1f}%")
+                            top10['图片相似度'] = top10['image_sim'].apply(
+                                lambda x: f"{x*100:.1f}%" if x is not None and not pd.isna(x) else "—")
+                            top10 = top10[['排名', 'asin', 'title', 'price_value', 'Total_Score',
+                                            '综合相似度', '图片相似度']]
+                            top10 = top10.rename(columns={
+                                'title': '标题', 'price_value': '价格(€)', 'Total_Score': '综合分'
+                            })
+                            st.dataframe(top10, hide_index=True, use_container_width=True)
+                else:
+                    # 没有图片相似度，只显示标题+价格匹配
+                    st.caption("ℹ️ 未上传新品主图或数据集图片向量计算失败，竞品匹配仅基于标题+价格")
+                    comp_display = result['competitors'][['asin', 'title', 'brand', 'price_value',
+                                                          'Total_Score', 'sim', 'title_sim', 'price_sim']].copy()
+                    comp_display['相似度'] = comp_display['sim'].apply(lambda x: f"{x*100:.1f}%")
+                    comp_display['标题相似'] = comp_display['title_sim'].apply(lambda x: f"{x*100:.1f}%")
+                    comp_display['价格相似'] = comp_display['price_sim'].apply(lambda x: f"{x*100:.1f}%")
+                    comp_display = comp_display.drop(columns=['sim', 'title_sim', 'price_sim'])
+                    comp_display = comp_display.rename(columns={
+                        'title': '标题', 'brand': '品牌', 'price_value': '价格(€)',
+                        'Total_Score': '综合分'
+                    })
+                    comp_display['链接'] = comp_display['asin'].apply(lambda x: f'https://www.amazon.de/dp/{x}')
+                    st.dataframe(comp_display, hide_index=True, use_container_width=True,
+                                 column_config={
+                                     "链接": st.column_config.LinkColumn("详情页",
+                                         display_text=r'^(https://www\.amazon\.de/dp/)(.*)')
+                                 })
 
 else:
     st.info("👈 请上传原始爬虫 JSON 文件开始分析")
