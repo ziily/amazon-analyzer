@@ -10,3 +10,4 @@ psutil>=5.9.0
 openpyxl>=3.1.0
 plotly>=5.14.0
 matplotlib>=3.7.0
+gliner
