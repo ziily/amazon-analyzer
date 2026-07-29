@@ -6,6 +6,10 @@ Amazon 产品竞争力分析 v3.0
 2. 批量 CLIP：可选启用，每产品 1 主图+2 详情+2 A+ 图
 3. 智能新品对比：分位数 + 视觉相似竞品匹配
 4. 数据集缓存：相同数据集秒级返回
+
+修改说明：
+- 修复批量 CLIP 分析时的内存溢出问题（OOM）
+- 改为逐个产品下载图片并推理，显式释放内存
 """
 
 import streamlit as st
@@ -17,6 +21,7 @@ import math
 import time
 import re
 import hashlib
+import gc  # 新增，用于强制垃圾回收
 from io import BytesIO
 from PIL import Image
 import requests
@@ -323,47 +328,44 @@ def compute_dataset_image_embeddings(thumbnail_urls_tuple):
     return embeddings
 
 # ==================== 批量 CLIP 分析（每产品 1主图+2详情+2A+图）====================
-@st.cache_data(show_spinner="🖼️ 批量 CLIP 图片分析中（每产品 5 张图，100 产品约 5-10 分钟）", ttl=3600 * 24 * 7)
+# ************** 修改开始 **************
+@st.cache_data(show_spinner="🖼️ 批量 CLIP 图片分析中（逐产品处理，内存优化）", ttl=3600 * 24 * 7)
 def batch_analyze_images_with_clip(image_records_tuple):
-    """批量分析数据集中所有产品的图片（每产品 1 主图+2 详情+2 A+图）
-    Args:
-        image_records_tuple: tuple of (asin, image_type, image_url)
-    Returns:
-        dict: {asin: {thumbnail_score, detail_score, aplus_score, dim_avgs, ...}}
+    """
+    批量分析数据集中所有产品的图片（每产品 1 主图+2 详情+2 A+图）
+    优化：逐个产品下载图片并推理，及时释放内存，避免 OOM
     """
     import torch
     if not image_records_tuple:
         return {}
     model, processor = load_clip()
     results = {}
-    total = len(image_records_tuple)
-    print(f"🖼️ 批量 CLIP 分析开始，共 {total} 张图片")
+    total_records = len(image_records_tuple)
 
-    # 收集所有 URL，并发下载
-    all_urls = [r[2] for r in image_records_tuple]  # r = (asin, image_type, image_url)
-    with ThreadPoolExecutor(max_workers=CONFIG["image_download_workers"]) as executor:
-        all_images = list(executor.map(_load_image_from_url, all_urls))
+    # 1. 按 ASIN 分组图片记录
+    asin_to_urls = {}
+    for asin, img_type, url in image_records_tuple:
+        asin_to_urls.setdefault(asin, []).append((img_type, url))
+    total_products = len(asin_to_urls)
+    print(f"🖼️ 批量 CLIP 分析开始：{total_records} 张图片，{total_products} 个产品")
 
-    # 按产品分组
-    asin_to_images = {}
-    for rec, img in zip(image_records_tuple, all_images):
-        asin = rec[0]
-        itype = rec[1]
-        if asin not in asin_to_images:
-            asin_to_images[asin] = []
-        if img is not None:
-            asin_to_images[asin].append({'image_type': itype, 'img': img})
-
-    print(f"  下载完成，{len(asin_to_images)} 个产品有图片")
-
-    # 逐产品推理
+    # 2. 逐个产品处理
     processed = 0
-    for asin, img_list in asin_to_images.items():
-        if not img_list:
+    for asin, url_list in asin_to_urls.items():
+        # 下载该产品的所有图片（最多5张）
+        imgs = []
+        types = []
+        for img_type, url in url_list:
+            img = _load_image_from_url(url)
+            if img is not None:
+                imgs.append(img)
+                types.append(img_type)
+        if not imgs:
+            print(f"⚠️ 产品 {asin} 图片下载失败，跳过")
             continue
+
         try:
-            imgs = [r['img'] for r in img_list]
-            types = [r['image_type'] for r in img_list]
+            # CLIP 推理
             inputs = processor(text=TEXT_PROMPTS, images=imgs, return_tensors="pt", padding=True)
             with torch.no_grad():
                 outputs = model(**inputs)
@@ -383,6 +385,7 @@ def batch_analyze_images_with_clip(image_records_tuple):
                 per_type_scores[itype].append(consumer)
                 per_type_features[itype].append(features)
 
+            # 汇总分数（与原逻辑完全一致）
             summary = {'asin': asin}
             if per_type_scores['thumbnail']:
                 summary['thumbnail_score'] = float(np.mean(per_type_scores['thumbnail']))
@@ -393,6 +396,7 @@ def batch_analyze_images_with_clip(image_records_tuple):
             else:
                 summary['thumbnail_score'] = 0
                 summary['thumbnail_attention'] = summary['thumbnail_purchase'] = summary['thumbnail_quality'] = 0
+
             if per_type_scores['high_resolution']:
                 summary['detail_score'] = float(np.mean(per_type_scores['high_resolution']))
                 summary['detail_image_count'] = len(per_type_scores['high_resolution'])
@@ -406,6 +410,7 @@ def batch_analyze_images_with_clip(image_records_tuple):
                 summary['detail_score'] = 0
                 summary['detail_image_count'] = 0
                 summary['detail_trust'] = summary['detail_value'] = summary['detail_usage'] = summary['detail_risk'] = 0
+
             if per_type_scores['a_plus']:
                 summary['aplus_score'] = float(np.mean(per_type_scores['a_plus']))
                 summary['aplus_count'] = len(per_type_scores['a_plus'])
@@ -419,6 +424,7 @@ def batch_analyze_images_with_clip(image_records_tuple):
                 summary['aplus_score'] = 0
                 summary['aplus_count'] = 0
                 summary['aplus_trust'] = summary['aplus_quality'] = summary['aplus_value'] = summary['aplus_brand'] = 0
+
             all_feats = []
             if per_type_features['thumbnail']: all_feats.extend(per_type_features['thumbnail'])
             if per_type_features['high_resolution']: all_feats.extend(per_type_features['high_resolution'])
@@ -427,8 +433,9 @@ def batch_analyze_images_with_clip(image_records_tuple):
             for dim in FEATURE_NAMES:
                 dim_avgs[dim] = float(np.mean([f[dim] * 100 for f in all_feats])) if all_feats else 0
             summary['dim_avgs'] = dim_avgs
-            summary['image_count'] = len(img_list)
-            # 保存主图 embedding
+            summary['image_count'] = len(imgs)
+
+            # 保存主图 embedding（若存在 thumbnail 则取第一张）
             if 'thumbnail' in types:
                 thumb_idx = types.index('thumbnail')
                 summary['main_embedding'] = img_embeds[thumb_idx].cpu().numpy()
@@ -436,15 +443,28 @@ def batch_analyze_images_with_clip(image_records_tuple):
                 summary['main_embedding'] = img_embeds[0].cpu().numpy()
             else:
                 summary['main_embedding'] = None
+
             results[asin] = summary
+
         except Exception as e:
             print(f"⚠️ 产品 {asin} CLIP 分析失败: {e}")
             continue
+        finally:
+            # 显式释放当前产品占用的内存
+            del imgs, types, inputs, outputs, logits, img_embeds
+            # 释放可能存在的其他大对象
+            if 'summary' in locals():
+                del summary
+            # 可选：强制垃圾回收（但会增加 CPU 开销，按需使用）
+            # gc.collect()
+
         processed += 1
-        if processed % 10 == 0 or processed == len(asin_to_images):
-            print(f"  CLIP 进度 {processed}/{len(asin_to_images)}")
-    print(f"✅ 批量 CLIP 分析完成，{len(results)}/{len(asin_to_images)} 个产品成功")
+        if processed % 10 == 0 or processed == total_products:
+            print(f"  CLIP 进度 {processed}/{total_products}")
+
+    print(f"✅ 批量 CLIP 分析完成，{len(results)}/{total_products} 个产品成功")
     return results
+# ************** 修改结束 **************
 
 # ==================== 评分函数 ====================
 def compute_title_score(title, text2score=None):
@@ -1469,6 +1489,7 @@ else:
     st.markdown("""
     ### 📖 使用说明
     **快速分析（默认）**
+    - 100 产品约 30 秒，图片得分固定 50
     **批量 CLIP 分析（侧边栏开启）**
     - 每产品分析 1 主图+2 详情+2 A+图
     - 100 产品约 5-10 分钟
