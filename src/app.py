@@ -985,47 +985,170 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
                            benchmarks, competitors, img_avg=None, img_source='estimated',
                            image_analysis_result=None):
     advice = []
+    # ==================== 标题专业建议 ====================
     title_q = benchmarks['title_score']
     if not new_title:
         advice.append(("❌", "标题", "标题为空，请填写完整标题（建议 60-180 字符，含品牌+核心关键词+规格）"))
-    elif title_score_val < title_q[0.25]:
-        issues = []
-        if len(new_title) < 30: issues.append(f"标题过短（{len(new_title)} 字符，建议 60-180）")
-        if not title_details['has_num']: issues.append("缺少数字（如尺寸/容量/数量）")
-        if not title_details['has_unit']: issues.append("缺少单位（cm/kg/W 等）")
-        missing_info = [k for k, v in title_details['hit'].items() if v == 0]
-        if missing_info:
-            info_map = {'material': '材质', 'color': '颜色', 'size': '尺寸', 'function': '功能', 'scenario': '场景'}
-            missing_cn = '、'.join(info_map.get(m, m) for m in missing_info)
-            issues.append(f"缺少信息点：{missing_cn}")
-        advice.append(("🔴", "标题", f"标题得分 {title_score_val}，处于后 25%。问题：{'；'.join(issues)}"))
-    elif title_score_val < title_q[0.5]:
-        advice.append(("🟠", "标题", f"标题得分 {title_score_val}，低于中位水平（{title_q[0.5]:.1f}），可继续优化关键词覆盖"))
     else:
-        advice.append(("🟢", "标题", f"标题得分 {title_score_val}，已超过数据集中位水平，保持"))
+        title_lower = new_title.lower()
+        # 品牌检测（简单规则）
+        words = re.findall(r'\b[a-zA-ZäöüßÄÖÜ]{3,}\b', new_title)
+        has_brand = any(word.istitle() or word.isupper() for word in new_title.split()) and len(new_title.split()) > 2
+        has_material = title_details['hit'].get('material', 0)
+        has_color = title_details['hit'].get('color', 0)
+        has_size = title_details['hit'].get('size', 0)
+        has_function = title_details['hit'].get('function', 0)
+        has_scenario = title_details['hit'].get('scenario', 0)
+        has_emotion = any(kw in title_lower for dim, kws in PSYCH_KEYWORDS.items() for kw in kws)
+        has_num = title_details['has_num']
+        has_unit = title_details['has_unit']
+
+        issues = []
+        suggestions = []
+
+        if len(new_title) < 60:
+            issues.append(f"标题过短（{len(new_title)} 字符），建议 60-180")
+            suggestions.append("扩展描述：加入核心属性（材质/尺寸/功能）和使用场景")
+        elif len(new_title) > 180:
+            issues.append(f"标题过长（{len(new_title)}），可能被截断")
+            suggestions.append("删除冗余修饰词，保留最核心的 3-4 个卖点")
+
+        if not has_brand:
+            issues.append("未检测到品牌名")
+            suggestions.append("在标题开头加入品牌名（如 'BrandName Product'）")
+
+        missing_info = []
+        if not has_material: missing_info.append("材质")
+        if not has_color: missing_info.append("颜色")
+        if not has_size: missing_info.append("尺寸/容量")
+        if not has_function: missing_info.append("功能")
+        if not has_scenario: missing_info.append("使用场景")
+        if missing_info:
+            issues.append(f"缺少信息点：{', '.join(missing_info)}")
+            suggestions.append(f"在标题中加入 {'、'.join(missing_info)} 相关关键词")
+
+        if not has_emotion and len(new_title) > 30:
+            issues.append("缺少情感触发词（如 premium, elegant）")
+            suggestions.append("加入 1-2 个情感词，例如 'Premium Quality'")
+
+        if not has_num and not has_unit:
+            issues.append("缺少数字或单位（如 4er Set, 5kg）")
+            suggestions.append("添加具体规格数字，增强说服力")
+
+        word_freq = {}
+        for w in words:
+            word_freq[w] = word_freq.get(w, 0) + 1
+        duplicates = [w for w, c in word_freq.items() if c > 1 and len(w) > 3]
+        if duplicates:
+            issues.append(f"存在重复关键词：{', '.join(duplicates[:2])}")
+            suggestions.append("精简重复词，使用同义词或属性词替代")
+
+        if title_score_val < title_q[0.25]:
+            if issues:
+                advice.append(("🔴", "标题", f"标题得分 {title_score_val}，处于后 25%。主要问题：{'；'.join(issues)}。优化建议：{'；'.join(suggestions[:3])}"))
+            else:
+                advice.append(("🔴", "标题", f"标题得分 {title_score_val}，处于后 25%。建议参考优秀竞品标题结构：品牌 + 核心关键词 + 属性 + 场景 + 情感词"))
+        elif title_score_val < title_q[0.5]:
+            if issues:
+                advice.append(("🟠", "标题", f"标题得分 {title_score_val}，低于中位（{title_q[0.5]:.1f}）。建议：{'；'.join(suggestions[:2])}"))
+            else:
+                advice.append(("🟠", "标题", f"标题得分 {title_score_val}，可继续优化关键词覆盖和情感表达"))
+        else:
+            advice.append(("🟢", "标题", f"标题得分 {title_score_val}，已超过中位水平。保持现有结构，可微调情感词增强吸引力"))
+
+        # 提供示例标题
+        if missing_info or not has_emotion:
+            example_parts = []
+            core = ' '.join([w for w in words if len(w) > 3][:3]) if words else "[产品核心名称]"
+            if not has_brand:
+                example_parts.append("[品牌名]")
+            example_parts.append(core)
+            if has_size == 0:
+                example_parts.append("[尺寸/容量]")
+            if has_material == 0:
+                example_parts.append("[材质]")
+            if has_color == 0:
+                example_parts.append("[颜色]")
+            if has_function == 0:
+                example_parts.append("[功能]")
+            if has_scenario == 0:
+                example_parts.append("[适用场景]")
+            if not has_emotion:
+                example_parts.append("[情感词]")
+            if example_parts:
+                example_title = ' '.join(example_parts)
+                if len(example_title) > 150:
+                    example_title = example_title[:150] + '...'
+                advice.append(("💡", "标题示例", f"可参考结构：{example_title}"))
+
+    # ==================== 五点描述专业建议 ====================
     bullet_q = benchmarks['bullet_score']
     if not features_list:
-        advice.append(("❌", "五点描述", "未填写五点描述，请至少提供 3-5 条卖点"))
-    elif feat_avg < bullet_q[0.25]:
-        advice.append(("🔴", "五点描述", f"五点描述均分 {feat_avg:.1f}，处于后 25%（中位 {bullet_q[0.5]:.1f}）。逐条诊断："))
-        for i, d in enumerate(feat_details):
-            sub_issues = []
-            if d['score'] < 40: sub_issues.append("得分偏低")
-            if not d['has_user_mention']: sub_issues.append("缺用户导向词（Sie/Ihnen）")
-            if not d['has_differentiation']: sub_issues.append("缺差异化词（einzigartig/exklusiv）")
-            if d['length'] < 50: sub_issues.append(f"过短（{d['length']} 字符）")
-            missing_cov = [k for k, v in d['coverage'].items() if v == 0]
-            if missing_cov:
-                cov_map = {'size': '尺寸', 'material': '材质', 'warranty': '保修', 'usage': '用途',
-                           'differentiation': '差异化', 'user_oriented': '用户导向'}
-                missing_cn = '、'.join(cov_map.get(m, m) for m in missing_cov[:3])
-                sub_issues.append(f"缺信息维度：{missing_cn}")
-            if sub_issues:
-                advice.append(("📌", f"  第{i+1}条", f"{d['text'][:60]}... → {'；'.join(sub_issues)}"))
-    elif feat_avg < bullet_q[0.5]:
-        advice.append(("🟠", "五点描述", f"五点描述均分 {feat_avg:.1f}，低于中位。建议加强差异化表达"))
+        advice.append(("❌", "五点描述", "未填写五点描述，请至少提供 3-5 条卖点。建议每条卖点遵循 FAB 结构：Feature（特征）→ Advantage（优势）→ Benefit（利益）"))
     else:
-        advice.append(("🟢", "五点描述", f"五点描述均分 {feat_avg:.1f}，超过中位水平"))
+        feature_keywords = ['material', 'size', 'weight', 'dimension', 'capacity', 'power', 'voltage', '材质', '尺寸', '重量', '容量']
+        advantage_keywords = ['easy', 'simple', 'fast', 'quick', 'effortless', '节省', '简化', '快速', '轻松']
+        benefit_keywords = ['enjoy', 'experience', 'feel', 'relax', 'solve', 'avoid', 'prevent', '享受', '体验', '解决', '避免']
+        fab_scores = []
+        for d in feat_details:
+            text = d['text'].lower()
+            has_f = any(kw in text for kw in feature_keywords)
+            has_a = any(kw in text for kw in advantage_keywords)
+            has_b = any(kw in text for kw in benefit_keywords)
+            fab_scores.append(sum([has_f, has_a, has_b]))
+        avg_fab = sum(fab_scores) / len(fab_scores) if fab_scores else 0
+
+        if feat_avg < bullet_q[0.25]:
+            advice.append(("🔴", "五点描述", f"五点描述均分 {feat_avg:.1f}，处于后 25%（中位 {bullet_q[0.5]:.1f}）。逐条诊断："))
+            for i, d in enumerate(feat_details):
+                sub_issues = []
+                sub_suggestions = []
+                text = d['text']
+                if len(text) < 50:
+                    sub_issues.append(f"过短（{len(text)} 字符）")
+                    sub_suggestions.append("扩展内容，加入具体数值或用户获益点")
+                if avg_fab < 2:
+                    if not any(kw in text.lower() for kw in feature_keywords):
+                        sub_issues.append("缺少 Feature（特征参数）")
+                        sub_suggestions.append("加入具体材质、尺寸或技术指标")
+                    if not any(kw in text.lower() for kw in advantage_keywords):
+                        sub_issues.append("缺少 Advantage（优势描述）")
+                        sub_suggestions.append("说明此特征带来的便利，如 '易于清洁'")
+                    if not any(kw in text.lower() for kw in benefit_keywords):
+                        sub_issues.append("缺少 Benefit（用户利益）")
+                        sub_suggestions.append("描述用户能获得什么好处，如 '享受舒适坐感'")
+                if not d['has_user_mention']:
+                    sub_issues.append("缺少用户导向词（Sie/Ihnen）")
+                    sub_suggestions.append("使用第二人称，让顾客感觉被关注")
+                if not d['has_differentiation']:
+                    sub_issues.append("缺少差异化词（einzigartig/exklusiv）")
+                    sub_suggestions.append("强调独特卖点，如 '独家设计'")
+                missing_cov = [k for k, v in d['coverage'].items() if v == 0]
+                if missing_cov:
+                    cov_map = {'size': '尺寸', 'material': '材质', 'warranty': '保修', 'usage': '用途',
+                               'differentiation': '差异化', 'user_oriented': '用户导向'}
+                    missing_cn = '、'.join(cov_map.get(m, m) for m in missing_cov[:3])
+                    sub_issues.append(f"缺信息维度：{missing_cn}")
+                    sub_suggestions.append(f"补充 {missing_cn} 相关信息")
+                if sub_issues:
+                    advice.append(("📌", f"  第{i+1}条", f"{d['text'][:60]}... → 问题：{'；'.join(sub_issues)}。建议：{'；'.join(sub_suggestions[:2])}"))
+                else:
+                    advice.append(("✅", f"  第{i+1}条", f"{d['text'][:60]}... → 结构良好，可保持"))
+        elif feat_avg < bullet_q[0.5]:
+            advice.append(("🟠", "五点描述", f"五点描述均分 {feat_avg:.1f}，低于中位（{bullet_q[0.5]:.1f}）。整体建议："))
+            if avg_fab < 2:
+                advice.append(("📌", "  结构", "多数卖点缺少完整的 FAB 结构，建议每条卖点按「特征→优势→利益」展开"))
+            if not any(d['has_differentiation'] for d in feat_details):
+                advice.append(("📌", "  差异化", "缺乏独特卖点，可加入竞品对比或独家功能描述"))
+            if not any(d['has_user_mention'] for d in feat_details):
+                advice.append(("📌", "  用户导向", "使用第二人称（Sie/Ihnen）拉近距离，增强说服力"))
+        else:
+            advice.append(("🟢", "五点描述", f"五点描述均分 {feat_avg:.1f}，超过中位水平。可进一步优化："))
+            if avg_fab < 2:
+                advice.append(("📌", "  细节", "部分卖点可强化 Benefit 描述，让顾客明确使用价值"))
+
+    # ==================== 其他维度（沿用原逻辑） ====================
+    # 价格
     price_q = benchmarks['price_score']
     if price_score < price_q[0.25]:
         if not competitors.empty and 'price_value' in competitors.columns:
@@ -1033,12 +1156,16 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
             if comp_prices:
                 comp_avg = sum(comp_prices) / len(comp_prices)
                 advice.append(("🔴", "价格", f"价格 {new_price}€ 处于后 25%（百分位 {price_score}），最相似竞品均价 {comp_avg:.2f}€，建议降价至 {comp_avg * 0.95:.2f}€ 以下"))
+            else:
+                advice.append(("🔴", "价格", f"价格竞争力处于后 25%（百分位 {price_score}），建议调价"))
         else:
             advice.append(("🔴", "价格", f"价格竞争力处于后 25%（百分位 {price_score}），建议调价"))
     elif price_score > price_q[0.75]:
         advice.append(("🟢", "价格", f"价格优势明显（百分位 {price_score}，前 25%）"))
     else:
         advice.append(("🟡", "价格", f"价格处于中位水平（百分位 {price_score}）"))
+
+    # 信任
     trust_q = benchmarks['trust_score']
     if trust_score_val < trust_q[0.25]:
         advice.append(("🔴", "信任", f"信任分 {trust_score_val}，处于后 25%。建议：1) Vine 计划；2) 30 天退货；3) 突出售后保障"))
@@ -1046,6 +1173,8 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
         advice.append(("🟠", "信任", f"信任分 {trust_score_val}，低于中位。建议加强售后政策展示"))
     else:
         advice.append(("🟢", "信任", f"信任分 {trust_score_val}，处于中上水平"))
+
+    # 视频
     video_q = benchmarks['video_score']
     if vid_s < video_q[0.25]:
         advice.append(("🔴", "视频", "无产品视频，建议制作 1 个 30 秒开箱演示 + 1 个使用场景视频"))
@@ -1053,15 +1182,18 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
         advice.append(("🟠", "视频", "视频数量偏少，建议补充使用场景视频"))
     else:
         advice.append(("🟢", "视频", "视频覆盖充分"))
+
+    # A+
     if not has_aplus:
         advice.append(("🟠", "A+ 内容", "未启用 A+ 内容，建议品牌备案后开通，加入品牌故事、对比模块、Q&A 模块"))
     else:
         advice.append(("🟢", "A+ 内容", "已启用 A+ 内容，建议加入竞品对比表和场景应用模块"))
+
+    # 图片
     img_q = benchmarks['image_score']
     if img_source == 'uploaded' and image_analysis_result:
         overall = image_analysis_result.get('overall_score', 0)
         dim_avgs = image_analysis_result.get('dim_avgs', {})
-        type_scores = image_analysis_result.get('type_scores', {})
         img_count = image_analysis_result.get('image_count', 0)
         if overall < img_q[0.25]:
             advice.append(("🔴", "图片", f"图片综合得分 {overall:.1f}（{img_count} 张已分析），处于后 25%。具体诊断："))
@@ -1081,12 +1213,15 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
         weak_dims = []
         for dim_key, dim_name, threshold, suggestion in dim_thresholds:
             val = dim_avgs.get(dim_key, 0) * 100
-            if val < threshold: weak_dims.append((dim_name, val, suggestion))
+            if val < threshold:
+                weak_dims.append((dim_name, val, suggestion))
         if weak_dims:
             for dim_name, val, suggestion in weak_dims[:4]:
                 advice.append(("📌", f"  图片·{dim_name}", f"{val:.1f}/100。{suggestion}"))
     else:
         advice.append(("ℹ️", "图片", f"未上传图片，图片维度用数据集中位数 {img_q[0.5]:.1f} 作为预估"))
+
+    # 竞品
     if not competitors.empty:
         comp_advice_lines = []
         for _, c in competitors.iterrows():
@@ -1104,6 +1239,7 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
             if gap_dims:
                 advice.append(("🎯", "竞品学习", f"最相似竞品 {best_comp['asin']} 总分 {best_comp.get('Total_Score', 0):.1f}，可借鉴：{'、'.join(gap_dims)}"))
         advice.append(("📋", "Top3 竞品", "\n".join(comp_advice_lines)))
+
     return advice
 
 # ==================== Streamlit UI ====================
