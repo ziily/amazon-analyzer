@@ -735,10 +735,10 @@ def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_c
         asin = item.get("asin")
         title = item.get("title")
        price_data = item.get("price")
-if isinstance(price_data, dict):
-    price = price_data.get("value")
-else:
-    price = price_data  # 如果是字符串或数字，直接保留
+       if isinstance(price_data, dict):
+           price = price_data.get("value")
+       else:
+           price = price_data  # 如果是字符串或数字，直接保留
         stars = item.get("stars") or 0
         reviews = item.get("reviewsCount") or 0
         position = (item.get("categoryPageData") or {}).get("productPosition")
