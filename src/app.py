@@ -7,7 +7,6 @@ Amazon 产品竞争力分析 v3.1 (增强版)
 3. 高频词参考：从数据集优秀产品中提取常用词，指导用户补充
 4. 具体改写模板：针对五点描述给出可复制的改写示例
 5. 缓存优化：高频词统计只计算一次
-6. 新增：从标题或 attributes 提取套装数量，计算单价并显示在前端
 """
 
 import streamlit as st
@@ -706,78 +705,7 @@ def analyze_reviews_fast(review_data):
     return pd.DataFrame(results)
 
 
-# ==================== 新增：从标题和 attributes 提取数量及单价 ====================
-def extract_quantity_from_title(title):
-    """
-    从标题中提取套装数量，例如 '4er Set', '6 Stück', '2-Pack' 等。
-    若未找到，返回 None。
-    """
-    if not title:
-        return None
-    title_lower = title.lower()
-    patterns = [
-        r'(\d+)\s*er\s*set',  # 4er Set
-        r'(\d+)\s*stück',  # 4 Stück
-        r'(\d+)\s*-pack',  # 4-Pack
-        r'pack\s*of\s*(\d+)',  # Pack of 4
-        r'(\d+)\s*pack',  # 4 pack
-        r'(\d+)\s*teilig',  # 4-teilig
-        r'(\d+)\s*in\s*1',  # 4 in 1
-        r'(\d+)\s*set',  # 4 set
-        r'(\d+)\s*pc',  # 4 pc
-        r'(\d+)\s*piece',  # 4 piece
-        r'(\d+)\s*pieces',  # 4 pieces
-    ]
-    for pat in patterns:
-        m = re.search(pat, title_lower)
-        if m:
-            return int(m.group(1))
-    return None
-
-
-def extract_quantity_from_attributes(attributes):
-    """
-    从 attributes 列表中查找表示数量的字段，如 'Anzahl von Einheiten'。
-    返回数值，否则 None。
-    """
-    if not attributes:
-        return None
-    # 可能的键名（不区分大小写）
-    quantity_keys = ['anzahl von einheiten', 'anzahl der teile', 'set-größe',
-                     'anzahl', 'einheiten', 'stück', 'menge', 'number of units',
-                     'pack quantity', 'count']
-    for attr in attributes:
-        key = attr.get('key', '').lower()
-        if any(k in key for k in quantity_keys):
-            value = attr.get('value', '')
-            nums = re.findall(r'(\d+\.?\d*)', value)
-            if nums:
-                return float(nums[0])
-    return None
-
-
-def get_quantity_and_unit_price(price_value, title, attributes):
-    """
-    获取数量和单价。
-    优先从标题提取，若失败则从 attributes 提取。
-    若都失败，数量=1，单价=总价。
-    """
-    quantity = extract_quantity_from_title(title)
-    if quantity is None:
-        quantity = extract_quantity_from_attributes(attributes)
-    if quantity is None:
-        quantity = 1
-    else:
-        # 若为浮点数（如 4.0），取整
-        quantity = int(quantity)
-    if price_value and quantity > 0:
-        unit_price = price_value / quantity
-    else:
-        unit_price = None
-    return quantity, unit_price
-
-
-# ==================== 主分析流水线（修改：加入数量与单价）====================
+# ==================== 主分析流水线（不变）====================
 def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_clip=False):
     def _update(p, msg):
         if progress_callback: progress_callback(p, msg)
@@ -791,13 +719,6 @@ def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_c
     review_list = data.get("评论信息", [])
     print(f"📊 数据加载：搜索页 {len(search_list)}，详情页 {len(listing_list)}，评论 {len(review_list)}")
     _update(5, f"分类数据加载完成：{len(search_list)} 个产品")
-
-    # 构建 asin -> attributes 映射
-    asin_to_attributes = {}
-    for listing in listing_list:
-        asin = listing.get("originalAsin")
-        if asin:
-            asin_to_attributes[asin] = listing.get("attributes", [])
 
     t_psych = time.time()
     all_features = []
@@ -867,7 +788,7 @@ def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_c
         if isinstance(price_data, dict):
             price = price_data.get("value")
         else:
-            price = price_data
+            price = price_data  # 如果是字符串或数字，直接保留
         stars = item.get("stars") or 0
         reviews = item.get("reviewsCount") or 0
         position = (item.get("categoryPageData") or {}).get("productPosition")
@@ -887,26 +808,11 @@ def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_c
         pos_score = round(1 / math.log(position + 2) * 100, 2) if position and position > 0 else 0
         search_score = (title_score_val * 0.25 + thumb_score * 0.30 + price_score * 0.15 +
                         trust_score_val * 0.20 + pos_score * 0.10)
-
-        # --- 新增：提取数量和单价 ---
-        attributes = asin_to_attributes.get(asin, [])
-        quantity, unit_price = get_quantity_and_unit_price(price, title, attributes)
-
-        search_results.append({
-            "asin": asin,
-            "title": (title or "")[:80],
-            "title_score": title_score_val,
-            "thumbnail_score": thumb_score,
-            "price_score": price_score,
-            "price_value": price,
-            "unit_price": unit_price,  # 新增
-            "quantity": quantity,  # 新增
-            "trust_score": trust_score_val,
-            "position_score": pos_score,
-            "search_score": round(search_score, 2),
-            "stars": stars,
-            "reviews": reviews
-        })
+        search_results.append({"asin": asin, "title": (title or "")[:80],
+                               "title_score": title_score_val, "thumbnail_score": thumb_score,
+                               "price_score": price_score, "price_value": price,
+                               "trust_score": trust_score_val, "position_score": pos_score,
+                               "search_score": round(search_score, 2), "stars": stars, "reviews": reviews})
     search_df = pd.DataFrame(search_results)
     if not search_df.empty:
         search_df["search_rank"] = search_df["search_score"].rank(ascending=False, method="min")
@@ -987,8 +893,7 @@ def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_c
     merged["Total_Score"] = 0.5 * merged["search_score"] + 0.5 * merged["Detail_Conversion"]
     merged = merged.sort_values("Total_Score", ascending=False)
     final_cols = ["asin", "title", "brand", "search_score", "Detail_Conversion", "Total_Score",
-                  "listing_score", "Conversion_Score", "search_rank", "price_value", "unit_price",
-                  "quantity", "stars", "reviews"]
+                  "listing_score", "Conversion_Score", "search_rank", "price_value", "stars", "reviews"]
     final_df = merged[[c for c in final_cols if c in merged.columns]]
     _update(100, "分析完成！")
     print(f"✅ 全部分析完成！总耗时 {time.time() - total_start:.2f} 秒")
@@ -1084,7 +989,7 @@ def get_top_keywords(df, column='title', top_n=10):
     return [w for w, c in freq.most_common(top_n)]
 
 
-# ==================== 增强版建议生成函数（保持不变，但传入 full_df）====================
+# ==================== 增强版建议生成函数 ====================
 def _generate_smart_advice(new_title, new_features, features_list, feat_details, title_details,
                            title_score_val, price_score, trust_score_val, feat_avg, vid_s, aplus_score,
                            has_aplus, has_brandstory, video_count, new_stars, new_reviews,
@@ -1167,7 +1072,7 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
             advice.append(
                 ("🟢", "标题", f"标题得分 {title_score_val}，已超过中位水平。保持现有结构，可微调情感词增强吸引力"))
 
-        # 高频词参考
+        # ----- 新增：高频词参考 -----
         if full_df is not None and not full_df.empty:
             top_words = get_top_keywords(full_df, 'title', 8)
             if top_words:
@@ -1198,7 +1103,7 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
                     example_title = example_title[:150] + '...'
                 advice.append(("💡", "标题示例", f"可参考结构：{example_title}"))
 
-    # ========== 五点描述建议 ==========
+    # ========== 五点描述建议（增强：逐条改写示例） ==========
     bullet_q = benchmarks['bullet_score']
     if not features_list:
         advice.append(("❌", "五点描述",
@@ -1254,9 +1159,11 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
                 if sub_issues:
                     advice.append(("📌", f"  第{i + 1}条",
                                    f"{d['text'][:60]}... → 问题：{'；'.join(sub_issues)}。建议：{'；'.join(sub_suggestions[:2])}"))
-                    # 生成改写示例
+                    # ----- 新增：生成具体改写示例 -----
+                    # 基于缺失维度构造一个简单的改写句子
                     orig = d['text']
                     new_sentence = orig
+                    # 如果缺少材质，插入材质占位
                     if '材质' in missing_cn or not any(
                             kw in orig.lower() for kw in ['material', 'leder', 'holz', 'stahl', 'stoff']):
                         new_sentence += " Hergestellt aus hochwertigem [Material]."
@@ -1382,7 +1289,7 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
     return advice
 
 
-# ==================== 新品分析入口（修改：支持 full_df 传递）====================
+# ==================== 新品分析入口（原函数，增加 full_df 传递）====================
 def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
                               new_features, has_aplus, has_brandstory,
                               video_count, full_df, classifier_text2score=None,
@@ -1474,6 +1381,7 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
                                 '数据集 P25': benchmarks[col][0.25], '数据集 P50（中位）': benchmarks[col][0.5],
                                 '数据集 P75': benchmarks[col][0.75], 'vs 中位': round(val - benchmarks[col][0.5], 2),
                                 '位置': _quantile_position(val, benchmarks[col])} for name, val, col in dim_rows])
+    # 传入 full_df 到建议生成函数
     advice = _generate_smart_advice(new_title, new_features, features_list, feat_details, title_details,
                                     title_score_val, price_score, trust_score_val, feat_avg, vid_s, aplus_score,
                                     has_aplus, has_brandstory, video_count, new_stars, new_reviews,
@@ -1491,9 +1399,9 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
             'has_image_sim': new_img_emb is not None and bool(dataset_image_embeddings)}
 
 
-# ==================== Streamlit UI ====================
+# ==================== Streamlit UI（保持不变）====================
 st.title("📊 Amazon 产品竞争力分析 v3.1")
-st.caption("🚀 快速层(关键词) + 深度层(CLIP 按需) | 新增：双语检测、高频词参考、改写示例、单价自动计算")
+st.caption("🚀 快速层(关键词) + 深度层(CLIP 按需) | 新增：双语检测、高频词参考、改写示例")
 
 with st.sidebar:
     st.header("⚙️ 分析选项")
@@ -1540,7 +1448,7 @@ if uploaded_file is not None:
             final_df = cached[cached['asin'].notna()][['asin', 'title', 'brand', 'search_score',
                                                        'Detail_Conversion', 'Total_Score', 'listing_score',
                                                        'Conversion_Score', 'search_rank', 'price_value',
-                                                       'unit_price', 'quantity', 'stars',
+                                                       'stars',
                                                        'reviews']].copy() if 'asin' in cached.columns else cached
             full_df = cached
         st.toast("💾 已从缓存加载", icon="✅")
@@ -1572,29 +1480,9 @@ if uploaded_file is not None:
     st.subheader("📋 产品竞争力排名")
     final_df_display = final_df.copy()
     final_df_display['商品链接'] = final_df_display['asin'].apply(lambda x: f'https://www.amazon.de/dp/{x}')
-    # 调整列顺序，把数量、单价放在价格附近
-    cols = final_df_display.columns.tolist()
-    # 确保 quantity 和 unit_price 在 DataFrame 中
-    # 重新排序列
-    order = ["asin", "title", "brand", "price_value", "unit_price", "quantity", "search_score", "Detail_Conversion",
-             "Total_Score", "listing_score", "Conversion_Score", "search_rank", "stars", "reviews", "商品链接"]
-    # 仅保留存在的列
-    order = [c for c in order if c in cols]
-    # 补充其他列（如果有）
-    extra = [c for c in cols if c not in order]
-    final_df_display = final_df_display[order + extra]
-    st.dataframe(
-        final_df_display,
-        column_config={
-            "商品链接": st.column_config.LinkColumn("详情页", display_text=r'^(https://www\.amazon\.de/dp/)(.*)'),
-            "price_value": st.column_config.NumberColumn("总价 (€)", format="%.2f"),
-            "unit_price": st.column_config.NumberColumn("单价 (€)", format="%.2f"),
-            "quantity": st.column_config.NumberColumn("数量", format="%d"),
-            "asin": None,
-        },
-        width='stretch',
-        hide_index=True
-    )
+    st.dataframe(final_df_display, column_config={
+        "商品链接": st.column_config.LinkColumn("详情页", display_text=r'^(https://www\.amazon\.de/dp/)(.*)'),
+        "asin": None}, width='stretch', hide_index=True)
     csv = final_df.to_csv(index=False, encoding="utf-8-sig")
     st.download_button("📥 下载结果 CSV", data=csv, file_name="product_competitiveness_final.csv", mime="text/csv")
     st.subheader("📈 数据可视化")
@@ -1633,20 +1521,9 @@ if uploaded_file is not None:
             st.plotly_chart(fig, use_container_width=True)
         with col_table:
             st.markdown("**📈 各维度详情**")
-            # 添加单价和数量
-            detail_data = {'维度': available_cols, '本品': [row[c] for c in available_cols],
-                           '中位': [medians[c] for c in available_cols],
-                           '差值': [round(row[c] - medians[c], 2) for c in available_cols]}
-            # 额外显示单价和数量
-            if 'unit_price' in row and 'quantity' in row:
-                detail_data['维度'] += ['单价 (€)', '数量']
-                detail_data['本品'] += [row['unit_price'], row['quantity']]
-                detail_data['中位'] += [full_df['unit_price'].median() if 'unit_price' in full_df else None,
-                                        full_df['quantity'].median() if 'quantity' in full_df else None]
-                detail_data['差值'] += [
-                    row['unit_price'] - (full_df['unit_price'].median() if 'unit_price' in full_df else 0),
-                    row['quantity'] - (full_df['quantity'].median() if 'quantity' in full_df else 0)]
-            detail_df = pd.DataFrame(detail_data)
+            detail_df = pd.DataFrame({'维度': available_cols, '本品': [row[c] for c in available_cols],
+                                      '中位': [medians[c] for c in available_cols],
+                                      '差值': [round(row[c] - medians[c], 2) for c in available_cols]})
             st.dataframe(detail_df, hide_index=True, use_container_width=True)
         # 单品 CLIP 深度分析
         if enable_deep_single:
@@ -1886,7 +1763,7 @@ if uploaded_file is not None:
                     st.markdown("")
                 st.markdown(f"**📊 {n_comp} 个竞品详细对比**")
                 if result.get('has_image_sim'):
-                    comp_display = result['competitors'][['asin', 'title', 'brand', 'price_value',
+                    comp_display = result['competitors'][['asin', 'title', 'brand', 'price_value', 'unit_price',
                                                           'Total_Score', 'sim', 'image_sim', 'title_sim',
                                                           'price_sim']].copy()
                     comp_display['排名'] = range(1, len(comp_display) + 1)
@@ -1896,23 +1773,32 @@ if uploaded_file is not None:
                     comp_display['标题相似'] = comp_display['title_sim'].apply(lambda x: f"{x * 100:.1f}%")
                     comp_display['价格相似'] = comp_display['price_sim'].apply(lambda x: f"{x * 100:.1f}%")
                     comp_display = comp_display.drop(columns=['sim', 'image_sim', 'title_sim', 'price_sim'])
-                    comp_display = comp_display.rename(
-                        columns={'title': '标题', 'brand': '品牌', 'price_value': '价格(€)', 'Total_Score': '综合分'})
-                    comp_display = comp_display[
-                        ['排名', 'asin', '标题', '品牌', '价格(€)', '综合分', '综合相似度', '图片相似', '标题相似',
-                         '价格相似']]
+                    comp_display = comp_display.rename(columns={
+                        'title': '标题',
+                        'brand': '品牌',
+                        'price_value': '总价(€)',
+                        'unit_price': '单价(€)',
+                        'Total_Score': '综合分'
+                    })
+                    comp_display = comp_display[['排名', 'asin', '标题', '品牌', '总价(€)', '单价(€)', '综合分',
+                                                 '综合相似度', '图片相似', '标题相似', '价格相似']]
                 else:
-                    comp_display = result['competitors'][['asin', 'title', 'brand', 'price_value',
+                    comp_display = result['competitors'][['asin', 'title', 'brand', 'price_value', 'unit_price',
                                                           'Total_Score', 'sim', 'title_sim', 'price_sim']].copy()
                     comp_display['排名'] = range(1, len(comp_display) + 1)
                     comp_display['综合相似度'] = comp_display['sim'].apply(lambda x: f"{x * 100:.1f}%")
                     comp_display['标题相似'] = comp_display['title_sim'].apply(lambda x: f"{x * 100:.1f}%")
                     comp_display['价格相似'] = comp_display['price_sim'].apply(lambda x: f"{x * 100:.1f}%")
                     comp_display = comp_display.drop(columns=['sim', 'title_sim', 'price_sim'])
-                    comp_display = comp_display.rename(
-                        columns={'title': '标题', 'brand': '品牌', 'price_value': '价格(€)', 'Total_Score': '综合分'})
-                    comp_display = comp_display[
-                        ['排名', 'asin', '标题', '品牌', '价格(€)', '综合分', '综合相似度', '标题相似', '价格相似']]
+                    comp_display = comp_display.rename(columns={
+                        'title': '标题',
+                        'brand': '品牌',
+                        'price_value': '总价(€)',
+                        'unit_price': '单价(€)',
+                        'Total_Score': '综合分'
+                    })
+                    comp_display = comp_display[['排名', 'asin', '标题', '品牌', '总价(€)', '单价(€)', '综合分',
+                                                 '综合相似度', '标题相似', '价格相似']]
                 comp_display['详情页'] = comp_display['asin'].apply(lambda x: f'https://www.amazon.de/dp/{x}')
                 st.dataframe(comp_display, hide_index=True, use_container_width=True,
                              column_config={"详情页": st.column_config.LinkColumn("Amazon",
@@ -1920,17 +1806,20 @@ if uploaded_file is not None:
                 if result.get('all_ranked') is not None and not result['all_ranked'].empty:
                     total_n = len(result['all_ranked'])
                     with st.expander(f"📊 查看数据集全部 {total_n} 个产品的相似度排名"):
-                        all_disp = result['all_ranked'][
-                            ['asin', 'title', 'price_value', 'Total_Score', 'sim', 'image_sim']].copy()
+                        all_disp = result['all_ranked'][['asin', 'title', 'price_value', 'unit_price',
+                                                         'Total_Score', 'sim', 'image_sim']].copy()
                         all_disp['排名'] = range(1, len(all_disp) + 1)
                         all_disp['综合相似度'] = all_disp['sim'].apply(lambda x: f"{x * 100:.1f}%")
                         all_disp['图片相似度'] = all_disp['image_sim'].apply(
                             lambda x: f"{x * 100:.1f}%" if x is not None and not pd.isna(x) else "—")
-                        all_disp = all_disp[
-                            ['排名', 'asin', '标题', 'price_value', 'Total_Score', '综合相似度', '图片相似度']]
-                        all_disp = all_disp.rename(
-                            columns={'title': '标题', 'price_value': '价格(€)', 'Total_Score': '综合分'})
-                        st.dataframe(all_disp, hide_index=True, use_container_width=True)
+                        all_disp = all_disp[['排名', 'asin', 'title', 'price_value', 'unit_price',
+                                             'Total_Score', '综合相似度', '图片相似度']]
+                        all_disp = all_disp.rename(columns={
+                            'title': '标题',
+                            'price_value': '总价(€)',
+                            'unit_price': '单价(€)',
+                            'Total_Score': '综合分'
+                        })
 else:
     st.info("👈 请上传原始爬虫 JSON 文件开始分析")
     st.markdown("""
@@ -1948,5 +1837,4 @@ else:
     - 双语检测（英德同时识别）
     - 高频词参考（基于数据集）
     - 五点描述改写示例
-    - **新增：自动从标题/attributes 提取套装数量，计算并显示单价**
     """)
