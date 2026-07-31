@@ -7,6 +7,7 @@ Amazon 产品竞争力分析 v3.1 (增强版)
 3. 高频词参考：从数据集优秀产品中提取常用词，指导用户补充
 4. 具体改写模板：针对五点描述给出可复制的改写示例
 5. 缓存优化：高频词统计只计算一次
+6. 新增：从标题或 attributes 提取套装数量，计算单价并显示在前端
 """
 
 import streamlit as st
@@ -46,6 +47,7 @@ CONFIG = {
     "analysis_cache_dir": "data/analysis_cache",
 }
 
+
 def dataset_hash(data):
     try:
         s = json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
@@ -53,24 +55,26 @@ def dataset_hash(data):
     except Exception:
         return str(int(time.time()))
 
+
 # ==================== 分类映射 ====================
 CLASSIFICATION = {
     "搜索页信息": ["title", "url", "asin", "thumbnailImage", "price", "listPrice",
-                  "stars", "reviewsCount", "delivery", "fastestDelivery",
-                  "isAmazonChoice", "amazonChoiceText", "categoryPageData",
-                  "unNormalizedProductUrl", "input"],
+                   "stars", "reviewsCount", "delivery", "fastestDelivery",
+                   "isAmazonChoice", "amazonChoiceText", "categoryPageData",
+                   "unNormalizedProductUrl", "input"],
     "listing信息": ["originalAsin", "inStock", "inStockText", "brand", "author",
-                  "breadCrumbs", "videosCount", "visitStoreLink", "galleryThumbnails",
-                  "highResolutionImages", "importantInformation", "sustainabilityFeatures",
-                  "description", "features", "attributes", "productOverview",
-                  "variantAsins", "variantDetails", "variantAttributes",
-                  "manufacturerAttributes", "condition", "returnPolicy", "support",
-                  "aPlusContent", "brandStory", "bookDescription", "locationText",
-                  "loadedCountryCode"],
+                    "breadCrumbs", "videosCount", "visitStoreLink", "galleryThumbnails",
+                    "highResolutionImages", "importantInformation", "sustainabilityFeatures",
+                    "description", "features", "attributes", "productOverview",
+                    "variantAsins", "variantDetails", "variantAttributes",
+                    "manufacturerAttributes", "condition", "returnPolicy", "support",
+                    "aPlusContent", "brandStory", "bookDescription", "locationText",
+                    "loadedCountryCode"],
     "评论信息": ["reviewsLink", "starsBreakdown", "aiReviewsSummary",
-                  "productPageReviews", "productPageReviewsFromOtherCountries",
-                  "reviewImages", "totalRatings", "customerId"]
+                 "productPageReviews", "productPageReviewsFromOtherCountries",
+                 "reviewImages", "totalRatings", "customerId"]
 }
+
 
 def classify_raw_data(products):
     classified = {"搜索页信息": [], "listing信息": [], "评论信息": []}
@@ -86,19 +90,23 @@ def classify_raw_data(products):
         classified["评论信息"].append(review_item)
     return classified
 
+
 # ==================== 关键词评分系统（扩充词库）====================
 PSYCH_KEYWORDS = {
-    "quality": ["premium", "hochwertig", "qualität", "profi", "erstklassig", "top quality", "geprüft", "exzellent", "spitzenqualität"],
+    "quality": ["premium", "hochwertig", "qualität", "profi", "erstklassig", "top quality", "geprüft", "exzellent",
+                "spitzenqualität"],
     "convenience": ["einfach", "mühelos", "schnell", "bequem", "praktisch", "easy", "handlich", "komfortabel"],
     "cost_saving": ["sparen", "günstig", "preiswert", "bestes preis", "value", "save", "discount", "kostengünstig"],
     "safety": ["sicher", "stabil", "robust", "rutschfest", "safety", "kindersicher", "bruchsicher"],
     "social_status": ["luxus", "exklusiv", "designer", "elegant", "premium design", "lifestyle", "edel"],
-    "health": ["gesund", "ergonomisch", "atmungsaktiv", "schadstofffrei", "natural", "bio", "öko", "allergikerfreundlich"],
+    "health": ["gesund", "ergonomisch", "atmungsaktiv", "schadstofffrei", "natural", "bio", "öko",
+               "allergikerfreundlich"],
     "durability": ["langlebig", "dauerhaft", "robust", "widerstandsfähig", "garantie", "rostfrei", "strapazierfähig"],
     "aesthetics": ["schön", "elegant", "modern", "stilvoll", "design", "ästhetisch", "chic", "zeitlos"],
     "innovation": ["innovativ", "neuartig", "einzigartig", "smart", "intelligent", "revolutionär", "fortschrittlich"],
     "trust": ["vertrauen", "garantie", "zertifiziert", "geprüft", "trusted", "official", "geprüfte sicherheit"],
 }
+
 
 def keyword_psych_score(text):
     if not text or len(text.strip()) < 3:
@@ -112,8 +120,10 @@ def keyword_psych_score(text):
     length_score = min(len(text) / 100, 1.0) * 40
     return round(diversity_score + length_score, 2)
 
+
 def batch_psych_scores_keyword(texts):
     return {t: keyword_psych_score(t) for t in texts if t and len(t.strip()) >= 3}
+
 
 # ==================== 信息点检测（双语合并 + 否定词处理）====================
 INFO_PATTERNS = {
@@ -142,6 +152,7 @@ INFO_PATTERNS = {
 # 新增：否定词列表
 NEGATION_WORDS = ['no', 'not', 'without', 'frei', 'ohne', 'kein', 'keine', 'nicht', 'never', 'niemals']
 
+
 def has_negation(text, pos=None, window=5):
     """
     检测文本中在指定位置附近是否有否定词。
@@ -156,6 +167,7 @@ def has_negation(text, pos=None, window=5):
     start = max(0, pos - window)
     end = min(len(words), pos + window + 1)
     return any(neg in ' '.join(words[start:end]) for neg in NEGATION_WORDS)
+
 
 def check_info_points(text, language="de"):
     """
@@ -184,23 +196,29 @@ def check_info_points(text, language="de"):
             hit[dim] = 0
     return hit
 
+
 # ==================== 覆盖度检测（双语合并）====================
 COVERAGE_KEYWORDS = {
     'de': {'size': ['größe', 'abmessungen', 'länge', 'breite', 'höhe', 'cm', 'mm', 'kg', 'g', 'ml', 'l', 'dimension'],
-            'material': ['material', 'stoff', 'leder', 'kunststoff', 'holz', 'baumwolle', 'polyester', 'metall', 'samt', 'werkstoff'],
-            'warranty': ['garantie', 'gewährleistung', '2-jährig', '1-jährig', 'lebenslang', 'rückgabe', 'zurückgeben'],
-            'usage': ['verwendung', 'geeignet für', 'perfekt für', 'ideal für', 'szenario', 'einsatz', 'anwendbar'],
-            'differentiation': ['einzigartig', 'exklusiv', 'nur', 'beste', 'anders als', 'vergleichen', 'überlegen', 'unique', 'exclusive'],
-            'user_oriented': ['sie', 'ihnen', 'ihr', 'benutzer', 'kunde', 'komfort', 'genießen', 'erleben', 'ihre', 'ihnen']},
+           'material': ['material', 'stoff', 'leder', 'kunststoff', 'holz', 'baumwolle', 'polyester', 'metall', 'samt',
+                        'werkstoff'],
+           'warranty': ['garantie', 'gewährleistung', '2-jährig', '1-jährig', 'lebenslang', 'rückgabe', 'zurückgeben'],
+           'usage': ['verwendung', 'geeignet für', 'perfekt für', 'ideal für', 'szenario', 'einsatz', 'anwendbar'],
+           'differentiation': ['einzigartig', 'exklusiv', 'nur', 'beste', 'anders als', 'vergleichen', 'überlegen',
+                               'unique', 'exclusive'],
+           'user_oriented': ['sie', 'ihnen', 'ihr', 'benutzer', 'kunde', 'komfort', 'genießen', 'erleben', 'ihre',
+                             'ihnen']},
     'en': {'size': ['size', 'dimension', 'length', 'width', 'height', 'cm', 'mm', 'kg', 'g', 'ml', 'l', 'dimensions'],
-            'material': ['material', 'fabric', 'leather', 'plastic', 'metal', 'wood', 'cotton', 'polyester', 'steel', 'velvet'],
-            'warranty': ['warranty', 'guarantee', '2-year', '1-year', 'lifetime', 'return', 'money-back'],
-            'usage': ['use', 'applicable', 'suitable for', 'perfect for', 'ideal for', 'scenario', 'application'],
-            'differentiation': ['unique', 'exclusive', 'only', 'best', 'unlike', 'compare', 'superior', 'exceptional'],
-            'user_oriented': ['you', 'your', 'user', 'customer', 'comfort', 'enjoy', 'experience', 'yourself']}
+           'material': ['material', 'fabric', 'leather', 'plastic', 'metal', 'wood', 'cotton', 'polyester', 'steel',
+                        'velvet'],
+           'warranty': ['warranty', 'guarantee', '2-year', '1-year', 'lifetime', 'return', 'money-back'],
+           'usage': ['use', 'applicable', 'suitable for', 'perfect for', 'ideal for', 'scenario', 'application'],
+           'differentiation': ['unique', 'exclusive', 'only', 'best', 'unlike', 'compare', 'superior', 'exceptional'],
+           'user_oriented': ['you', 'your', 'user', 'customer', 'comfort', 'enjoy', 'experience', 'yourself']}
 }
 COVERAGE_WEIGHTS = {'size': 0.2, 'material': 0.2, 'warranty': 0.1, 'usage': 0.15,
                     'differentiation': 0.2, 'user_oriented': 0.15}
+
 
 def check_coverage(text, language='de'):
     """
@@ -219,6 +237,7 @@ def check_coverage(text, language='de'):
     total = sum(coverage[dim] * COVERAGE_WEIGHTS[dim] for dim in COVERAGE_WEIGHTS) * 100
     return {'coverage': coverage, 'total_score': round(total, 2)}
 
+
 # ==================== CLIP 模型（不变）====================
 @st.cache_resource
 def load_clip():
@@ -230,6 +249,7 @@ def load_clip():
     model.eval()
     print("✅ CLIP 加载完成")
     return model, processor
+
 
 LABELS = {
     "attention": "a visually striking product photo that stands out in Amazon search results",
@@ -246,6 +266,7 @@ LABELS = {
 FEATURE_NAMES = list(LABELS.keys())[:-1]
 TEXT_PROMPTS = list(LABELS.values())
 
+
 def calculate_consumer_score(features, image_type):
     if image_type == "thumbnail":
         score = (features["attention"] * 0.35 + features["product_understanding"] * 0.30 +
@@ -260,12 +281,14 @@ def calculate_consumer_score(features, image_type):
         score = 0
     return round(score * 100, 2)
 
+
 def _load_image_from_url(url, timeout=10):
     try:
         response = requests.get(url, timeout=timeout)
         return Image.open(BytesIO(response.content)).convert("RGB")
     except Exception:
         return None
+
 
 # ==================== 新品图片分析（不变）====================
 @st.cache_data(show_spinner=False, ttl=3600 * 24)
@@ -336,6 +359,7 @@ def analyze_uploaded_images_with_clip(uploaded_image_bytes_list, image_types_lis
         'main_image_index': main_image_index,
     }
 
+
 # ==================== 数据集 embedding（不变）====================
 @st.cache_data(show_spinner="🖼️ 计算数据集图片向量中（首次约 1-3 分钟，之后秒级）", ttl=3600 * 24 * 7)
 def compute_dataset_image_embeddings(thumbnail_urls_tuple):
@@ -344,12 +368,14 @@ def compute_dataset_image_embeddings(thumbnail_urls_tuple):
         return {}
     model, processor = load_clip()
     embeddings = {}
+
     def _download(url):
         try:
             resp = requests.get(url, timeout=10)
             return Image.open(BytesIO(resp.content)).convert("RGB")
         except Exception:
             return None
+
     urls = [u for _, u in thumbnail_urls_tuple]
     with ThreadPoolExecutor(max_workers=CONFIG["image_download_workers"]) as executor:
         images = list(executor.map(_download, urls))
@@ -377,6 +403,7 @@ def compute_dataset_image_embeddings(thumbnail_urls_tuple):
             print(f"  embedding 进度 {min(i + batch_size, len(valid_records))}/{len(valid_records)}")
     print(f"✅ 数据集图片 embedding 完成，{len(embeddings)}/{len(thumbnail_urls_tuple)}")
     return embeddings
+
 
 # ==================== 批量 CLIP 分析（内存优化版，不变）====================
 @st.cache_data(show_spinner="🖼️ 批量 CLIP 图片分析中（逐产品处理，内存优化）", ttl=3600 * 24 * 7)
@@ -442,7 +469,7 @@ def batch_analyze_images_with_clip(image_records_tuple):
                 summary['detail_score'] = float(np.mean(per_type_scores['high_resolution']))
                 summary['detail_image_count'] = len(per_type_scores['high_resolution'])
                 detail_feats_avg = {dim: float(np.mean([f[dim] for f in per_type_features['high_resolution']])) * 100
-                                     for dim in FEATURE_NAMES}
+                                    for dim in FEATURE_NAMES}
                 summary['detail_trust'] = detail_feats_avg['trust_signal']
                 summary['detail_value'] = detail_feats_avg['value_perception']
                 summary['detail_usage'] = detail_feats_avg['usage_imagination']
@@ -456,7 +483,7 @@ def batch_analyze_images_with_clip(image_records_tuple):
                 summary['aplus_score'] = float(np.mean(per_type_scores['a_plus']))
                 summary['aplus_count'] = len(per_type_scores['a_plus'])
                 aplus_feats_avg = {dim: float(np.mean([f[dim] for f in per_type_features['a_plus']])) * 100
-                                    for dim in FEATURE_NAMES}
+                                   for dim in FEATURE_NAMES}
                 summary['aplus_trust'] = aplus_feats_avg['trust_signal']
                 summary['aplus_quality'] = aplus_feats_avg['quality_perception']
                 summary['aplus_value'] = aplus_feats_avg['value_perception']
@@ -501,16 +528,22 @@ def batch_analyze_images_with_clip(image_records_tuple):
     print(f"✅ 批量 CLIP 分析完成，{len(results)}/{total_products} 个产品成功")
     return results
 
+
 # ==================== 评分函数（不变）====================
 def compute_title_score(title, text2score=None):
     if not title:
         return 0, {"length": 0, "psych": 0, "info": 0, "has_num": False, "has_unit": False, "hit": {}}
     length = len(title)
-    if 60 <= length <= 180: len_score = 100
-    elif 30 <= length < 60: len_score = 70
-    elif 180 < length <= 250: len_score = 80
-    elif length > 250: len_score = 50
-    else: len_score = 40
+    if 60 <= length <= 180:
+        len_score = 100
+    elif 30 <= length < 60:
+        len_score = 70
+    elif 180 < length <= 250:
+        len_score = 80
+    elif length > 250:
+        len_score = 50
+    else:
+        len_score = 40
     if text2score and title in text2score:
         psych_score = text2score[title]
     else:
@@ -527,6 +560,7 @@ def compute_title_score(title, text2score=None):
                "has_num": has_num, "has_unit": has_unit, "hit": info_hit}
     return total, details
 
+
 def score_features_batch(features, text2score):
     if not features: return 0.0
     count = len(features)
@@ -540,6 +574,7 @@ def score_features_batch(features, text2score):
     total = count_score * 0.3 + len_score * 0.3 + psycho_score * 0.4
     return round(min(total, 100), 2)
 
+
 def score_attributes(attributes):
     if not attributes: return 0.0
     count = len(attributes)
@@ -551,8 +586,10 @@ def score_attributes(attributes):
     total = count_score * 0.5 + len_score * 0.4 + numeric_bonus
     return round(min(total, 100), 2)
 
+
 def score_important(info):
     return 100.0 if info and info.get("items") else 0.0
+
 
 def score_aplus(aplus):
     if not aplus: return 0.0
@@ -566,12 +603,15 @@ def score_aplus(aplus):
     img_bonus = min(img_count, 3) * 3
     return round(min(mod_score + video_bonus + img_bonus, 100), 2)
 
+
 def score_video(count):
     if count is None or count == 0: return 0.0
     return 100.0 if count >= 3 else (90.0 if count == 2 else 70.0)
 
+
 def score_brandstory(story):
     return 100.0 if story and story.get("items") else 0.0
+
 
 def score_images_with_clip(asin, clip_result):
     if not clip_result:
@@ -588,6 +628,7 @@ def score_images_with_clip(asin, clip_result):
     total = main_score * 0.40 + detail_score * 0.40 + aplus_score * 0.20
     return round(total, 2)
 
+
 def score_images_simple(asin, listing):
     high_imgs = listing.get("highResolutionImages", []) or []
     gallery = listing.get("galleryThumbnails", []) or []
@@ -598,11 +639,14 @@ def score_images_simple(asin, listing):
             n = 0
             if isinstance(obj, dict):
                 for k, v in obj.items():
-                    if k == "url" and isinstance(v, str): n += 1
-                    else: n += _count_urls(v)
+                    if k == "url" and isinstance(v, str):
+                        n += 1
+                    else:
+                        n += _count_urls(v)
             elif isinstance(obj, list):
                 for item in obj: n += _count_urls(item)
             return n
+
         aplus_count = _count_urls(aplus)
     high_count = len(high_imgs)
     gallery_count = len(gallery)
@@ -612,6 +656,7 @@ def score_images_simple(asin, listing):
     if high_count > 0: diversity_bonus += 5
     if aplus_count > 0: diversity_bonus += 5
     return round(min(count_score + diversity_bonus, 100), 2)
+
 
 # ==================== 评论分析（不变）====================
 def analyze_reviews_fast(review_data):
@@ -660,10 +705,83 @@ def analyze_reviews_fast(review_data):
                         "Conversion_Score": round(final_score, 2)})
     return pd.DataFrame(results)
 
-# ==================== 主分析流水线（不变）====================
+
+# ==================== 新增：从标题和 attributes 提取数量及单价 ====================
+def extract_quantity_from_title(title):
+    """
+    从标题中提取套装数量，例如 '4er Set', '6 Stück', '2-Pack' 等。
+    若未找到，返回 None。
+    """
+    if not title:
+        return None
+    title_lower = title.lower()
+    patterns = [
+        r'(\d+)\s*er\s*set',  # 4er Set
+        r'(\d+)\s*stück',  # 4 Stück
+        r'(\d+)\s*-pack',  # 4-Pack
+        r'pack\s*of\s*(\d+)',  # Pack of 4
+        r'(\d+)\s*pack',  # 4 pack
+        r'(\d+)\s*teilig',  # 4-teilig
+        r'(\d+)\s*in\s*1',  # 4 in 1
+        r'(\d+)\s*set',  # 4 set
+        r'(\d+)\s*pc',  # 4 pc
+        r'(\d+)\s*piece',  # 4 piece
+        r'(\d+)\s*pieces',  # 4 pieces
+    ]
+    for pat in patterns:
+        m = re.search(pat, title_lower)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def extract_quantity_from_attributes(attributes):
+    """
+    从 attributes 列表中查找表示数量的字段，如 'Anzahl von Einheiten'。
+    返回数值，否则 None。
+    """
+    if not attributes:
+        return None
+    # 可能的键名（不区分大小写）
+    quantity_keys = ['anzahl von einheiten', 'anzahl der teile', 'set-größe',
+                     'anzahl', 'einheiten', 'stück', 'menge', 'number of units',
+                     'pack quantity', 'count']
+    for attr in attributes:
+        key = attr.get('key', '').lower()
+        if any(k in key for k in quantity_keys):
+            value = attr.get('value', '')
+            nums = re.findall(r'(\d+\.?\d*)', value)
+            if nums:
+                return float(nums[0])
+    return None
+
+
+def get_quantity_and_unit_price(price_value, title, attributes):
+    """
+    获取数量和单价。
+    优先从标题提取，若失败则从 attributes 提取。
+    若都失败，数量=1，单价=总价。
+    """
+    quantity = extract_quantity_from_title(title)
+    if quantity is None:
+        quantity = extract_quantity_from_attributes(attributes)
+    if quantity is None:
+        quantity = 1
+    else:
+        # 若为浮点数（如 4.0），取整
+        quantity = int(quantity)
+    if price_value and quantity > 0:
+        unit_price = price_value / quantity
+    else:
+        unit_price = None
+    return quantity, unit_price
+
+
+# ==================== 主分析流水线（修改：加入数量与单价）====================
 def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_clip=False):
     def _update(p, msg):
         if progress_callback: progress_callback(p, msg)
+
     total_start = time.time()
     if limit > 0:
         classified_data = {k: v[:limit] for k, v in classified_data.items()}
@@ -673,6 +791,13 @@ def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_c
     review_list = data.get("评论信息", [])
     print(f"📊 数据加载：搜索页 {len(search_list)}，详情页 {len(listing_list)}，评论 {len(review_list)}")
     _update(5, f"分类数据加载完成：{len(search_list)} 个产品")
+
+    # 构建 asin -> attributes 映射
+    asin_to_attributes = {}
+    for listing in listing_list:
+        asin = listing.get("originalAsin")
+        if asin:
+            asin_to_attributes[asin] = listing.get("attributes", [])
 
     t_psych = time.time()
     all_features = []
@@ -702,11 +827,14 @@ def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_c
                     urls = []
                     if isinstance(obj, dict):
                         for k, v in obj.items():
-                            if k == "url" and isinstance(v, str): urls.append(v)
-                            else: urls.extend(_extract_urls(v))
+                            if k == "url" and isinstance(v, str):
+                                urls.append(v)
+                            else:
+                                urls.extend(_extract_urls(v))
                     elif isinstance(obj, list):
                         for item in obj: urls.extend(_extract_urls(item))
                     return urls
+
                 aplus_urls = _extract_urls(aplus)[:2]
                 for url in aplus_urls:
                     image_records.append({'asin': asin, 'image_type': 'a_plus', 'image_url': url})
@@ -718,7 +846,8 @@ def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_c
         print(f"🖼️ 共提取 {len(image_records)} 张图片")
         _update(20, f"提取图片 {len(image_records)} 张，开始 CLIP 分析")
         try:
-            clip_results = batch_analyze_images_with_clip(tuple([(r['asin'], r['image_type'], r['image_url']) for r in image_records]))
+            clip_results = batch_analyze_images_with_clip(
+                tuple([(r['asin'], r['image_type'], r['image_url']) for r in image_records]))
         except Exception as e:
             print(f"⚠️ 批量 CLIP 失败: {e}")
             clip_results = {}
@@ -738,7 +867,7 @@ def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_c
         if isinstance(price_data, dict):
             price = price_data.get("value")
         else:
-            price = price_data  # 如果是字符串或数字，直接保留
+            price = price_data
         stars = item.get("stars") or 0
         reviews = item.get("reviewsCount") or 0
         position = (item.get("categoryPageData") or {}).get("productPosition")
@@ -758,11 +887,26 @@ def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_c
         pos_score = round(1 / math.log(position + 2) * 100, 2) if position and position > 0 else 0
         search_score = (title_score_val * 0.25 + thumb_score * 0.30 + price_score * 0.15 +
                         trust_score_val * 0.20 + pos_score * 0.10)
-        search_results.append({"asin": asin, "title": (title or "")[:80],
-                               "title_score": title_score_val, "thumbnail_score": thumb_score,
-                               "price_score": price_score, "price_value": price,
-                               "trust_score": trust_score_val, "position_score": pos_score,
-                               "search_score": round(search_score, 2), "stars": stars, "reviews": reviews})
+
+        # --- 新增：提取数量和单价 ---
+        attributes = asin_to_attributes.get(asin, [])
+        quantity, unit_price = get_quantity_and_unit_price(price, title, attributes)
+
+        search_results.append({
+            "asin": asin,
+            "title": (title or "")[:80],
+            "title_score": title_score_val,
+            "thumbnail_score": thumb_score,
+            "price_score": price_score,
+            "price_value": price,
+            "unit_price": unit_price,  # 新增
+            "quantity": quantity,  # 新增
+            "trust_score": trust_score_val,
+            "position_score": pos_score,
+            "search_score": round(search_score, 2),
+            "stars": stars,
+            "reviews": reviews
+        })
     search_df = pd.DataFrame(search_results)
     if not search_df.empty:
         search_df["search_rank"] = search_df["search_score"].rank(ascending=False, method="min")
@@ -803,11 +947,16 @@ def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_c
         else:
             stars = reviews = 0
         trust_bonus = 0
-        if stars >= 4.5: trust_bonus += 4
-        elif stars >= 4.2: trust_bonus += 2
-        if reviews > 1000: trust_bonus += 3
-        elif reviews > 500: trust_bonus += 1.5
-        elif reviews > 100: trust_bonus += 0.5
+        if stars >= 4.5:
+            trust_bonus += 4
+        elif stars >= 4.2:
+            trust_bonus += 2
+        if reviews > 1000:
+            trust_bonus += 3
+        elif reviews > 500:
+            trust_bonus += 1.5
+        elif reviews > 100:
+            trust_bonus += 0.5
         final = min(base + brand_bonus + trust_bonus, 100)
         cov_scores = []
         for feat in features:
@@ -838,17 +987,20 @@ def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_c
     merged["Total_Score"] = 0.5 * merged["search_score"] + 0.5 * merged["Detail_Conversion"]
     merged = merged.sort_values("Total_Score", ascending=False)
     final_cols = ["asin", "title", "brand", "search_score", "Detail_Conversion", "Total_Score",
-                  "listing_score", "Conversion_Score", "search_rank", "price_value", "stars", "reviews"]
+                  "listing_score", "Conversion_Score", "search_rank", "price_value", "unit_price",
+                  "quantity", "stars", "reviews"]
     final_df = merged[[c for c in final_cols if c in merged.columns]]
     _update(100, "分析完成！")
     print(f"✅ 全部分析完成！总耗时 {time.time() - total_start:.2f} 秒")
     return final_df, merged, clip_results
+
 
 # ==================== 智能新品分析（增强版）====================
 def compute_quantiles(series, qs=(0.25, 0.5, 0.75)):
     s = pd.Series(series).dropna()
     if len(s) == 0: return {q: 50 for q in qs}
     return {q: float(s.quantile(q)) for q in qs}
+
 
 def find_top_competitors(full_df, new_title, new_price, top_n=3,
                          new_image_embedding=None, dataset_embeddings=None,
@@ -858,11 +1010,13 @@ def find_top_competitors(full_df, new_title, new_price, top_n=3,
     df = full_df.copy()
     if new_title:
         new_words = set(re.findall(r'\w+', new_title.lower()))
+
         def jaccard(title):
             if not title or not isinstance(title, str): return 0
             words = set(re.findall(r'\w+', title.lower()))
             if not words: return 0
             return len(new_words & words) / len(new_words | words)
+
         df['title_sim'] = df['title'].apply(jaccard) if 'title' in df.columns else 0
     else:
         df['title_sim'] = 0
@@ -881,6 +1035,7 @@ def find_top_competitors(full_df, new_title, new_price, top_n=3,
             emb = dataset_embeddings.get(asin)
             if emb is None: return None
             return float(np.dot(new_image_embedding, emb))
+
         df['image_sim'] = df['asin'].apply(_cosine_sim)
         valid_sims = df['image_sim'].dropna()
         fill_val = valid_sims.median() if len(valid_sims) > 0 else 0.5
@@ -894,38 +1049,49 @@ def find_top_competitors(full_df, new_title, new_price, top_n=3,
     top = df.nlargest(top_n, 'sim')
     return top, df
 
+
 def _quantile_position(val, q_dict):
     p25, p50, p75 = q_dict[0.25], q_dict[0.5], q_dict[0.75]
-    if val >= p75: return "🟢 前 25%"
-    elif val >= p50: return "🟡 中上"
-    elif val >= p25: return "🟠 中下"
-    else: return "🔴 后 25%"
+    if val >= p75:
+        return "🟢 前 25%"
+    elif val >= p50:
+        return "🟡 中上"
+    elif val >= p25:
+        return "🟠 中下"
+    else:
+        return "🔴 后 25%"
+
 
 # ==================== 新增：高频词提取（带缓存）====================
-@st.cache_data(ttl=3600*24)
+@st.cache_data(ttl=3600 * 24)
 def get_top_keywords(df, column='title', top_n=10):
     """从数据集中提取高频关键词（排除停用词）"""
     if df.empty or column not in df.columns:
         return []
-    stopwords = {'the','a','an','to','for','of','with','in','on','at','by','and','or','for','is','it','this','that','from',
-                 'und','der','die','das','für','mit','von','zu','auf','bei','aus','ein','eine','einen','dem','den','des',
-                 'als','auch','sich','nicht','ich','es','sie','wir','euch','ihr','ihnen','euch','mein','dein','ihr','unser',
-                 'euer','meine','deine','ihre','unsere','eure','ist','sind','war','waren','hat','haben','wurde','wurden',
-                 'your','our','their','my','your','her','his','its','our','their'}
+    stopwords = {'the', 'a', 'an', 'to', 'for', 'of', 'with', 'in', 'on', 'at', 'by', 'and', 'or', 'for', 'is', 'it',
+                 'this', 'that', 'from',
+                 'und', 'der', 'die', 'das', 'für', 'mit', 'von', 'zu', 'auf', 'bei', 'aus', 'ein', 'eine', 'einen',
+                 'dem', 'den', 'des',
+                 'als', 'auch', 'sich', 'nicht', 'ich', 'es', 'sie', 'wir', 'euch', 'ihr', 'ihnen', 'euch', 'mein',
+                 'dein', 'ihr', 'unser',
+                 'euer', 'meine', 'deine', 'ihre', 'unsere', 'eure', 'ist', 'sind', 'war', 'waren', 'hat', 'haben',
+                 'wurde', 'wurden',
+                 'your', 'our', 'their', 'my', 'your', 'her', 'his', 'its', 'our', 'their'}
     texts = df[column].dropna().str.lower()
     all_words = ' '.join(texts).split()
-    words = [w for w in all_words if re.match(r'^[a-zäöüß]+$', w) and len(w)>2 and w not in stopwords]
+    words = [w for w in all_words if re.match(r'^[a-zäöüß]+$', w) and len(w) > 2 and w not in stopwords]
     freq = Counter(words)
     return [w for w, c in freq.most_common(top_n)]
 
-# ==================== 增强版建议生成函数 ====================
+
+# ==================== 增强版建议生成函数（保持不变，但传入 full_df）====================
 def _generate_smart_advice(new_title, new_features, features_list, feat_details, title_details,
                            title_score_val, price_score, trust_score_val, feat_avg, vid_s, aplus_score,
                            has_aplus, has_brandstory, video_count, new_stars, new_reviews,
                            benchmarks, competitors, img_avg=None, img_source='estimated',
                            image_analysis_result=None, full_df=None):
     advice = []
-    
+
     # ========== 标题建议 ==========
     title_q = benchmarks['title_score']
     if not new_title:
@@ -986,18 +1152,22 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
         # 基础诊断
         if title_score_val < title_q[0.25]:
             if issues:
-                advice.append(("🔴", "标题", f"标题得分 {title_score_val}，处于后 25%。主要问题：{'；'.join(issues)}。优化建议：{'；'.join(suggestions[:3])}"))
+                advice.append(("🔴", "标题",
+                               f"标题得分 {title_score_val}，处于后 25%。主要问题：{'；'.join(issues)}。优化建议：{'；'.join(suggestions[:3])}"))
             else:
-                advice.append(("🔴", "标题", f"标题得分 {title_score_val}，处于后 25%。建议参考优秀竞品标题结构：品牌 + 核心关键词 + 属性 + 场景 + 情感词"))
+                advice.append(("🔴", "标题",
+                               f"标题得分 {title_score_val}，处于后 25%。建议参考优秀竞品标题结构：品牌 + 核心关键词 + 属性 + 场景 + 情感词"))
         elif title_score_val < title_q[0.5]:
             if issues:
-                advice.append(("🟠", "标题", f"标题得分 {title_score_val}，低于中位（{title_q[0.5]:.1f}）。建议：{'；'.join(suggestions[:2])}"))
+                advice.append(("🟠", "标题",
+                               f"标题得分 {title_score_val}，低于中位（{title_q[0.5]:.1f}）。建议：{'；'.join(suggestions[:2])}"))
             else:
                 advice.append(("🟠", "标题", f"标题得分 {title_score_val}，可继续优化关键词覆盖和情感表达"))
         else:
-            advice.append(("🟢", "标题", f"标题得分 {title_score_val}，已超过中位水平。保持现有结构，可微调情感词增强吸引力"))
+            advice.append(
+                ("🟢", "标题", f"标题得分 {title_score_val}，已超过中位水平。保持现有结构，可微调情感词增强吸引力"))
 
-        # ----- 新增：高频词参考 -----
+        # 高频词参考
         if full_df is not None and not full_df.empty:
             top_words = get_top_keywords(full_df, 'title', 8)
             if top_words:
@@ -1028,14 +1198,17 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
                     example_title = example_title[:150] + '...'
                 advice.append(("💡", "标题示例", f"可参考结构：{example_title}"))
 
-    # ========== 五点描述建议（增强：逐条改写示例） ==========
+    # ========== 五点描述建议 ==========
     bullet_q = benchmarks['bullet_score']
     if not features_list:
-        advice.append(("❌", "五点描述", "未填写五点描述，请至少提供 3-5 条卖点。建议每条卖点遵循 FAB 结构：Feature（特征）→ Advantage（优势）→ Benefit（利益）"))
+        advice.append(("❌", "五点描述",
+                       "未填写五点描述，请至少提供 3-5 条卖点。建议每条卖点遵循 FAB 结构：Feature（特征）→ Advantage（优势）→ Benefit（利益）"))
     else:
-        feature_keywords = ['material', 'size', 'weight', 'dimension', 'capacity', 'power', 'voltage', '材质', '尺寸', '重量', '容量']
+        feature_keywords = ['material', 'size', 'weight', 'dimension', 'capacity', 'power', 'voltage', '材质', '尺寸',
+                            '重量', '容量']
         advantage_keywords = ['easy', 'simple', 'fast', 'quick', 'effortless', '节省', '简化', '快速', '轻松']
-        benefit_keywords = ['enjoy', 'experience', 'feel', 'relax', 'solve', 'avoid', 'prevent', '享受', '体验', '解决', '避免']
+        benefit_keywords = ['enjoy', 'experience', 'feel', 'relax', 'solve', 'avoid', 'prevent', '享受', '体验', '解决',
+                            '避免']
         fab_scores = []
         for d in feat_details:
             text = d['text'].lower()
@@ -1046,7 +1219,8 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
         avg_fab = sum(fab_scores) / len(fab_scores) if fab_scores else 0
 
         if feat_avg < bullet_q[0.25]:
-            advice.append(("🔴", "五点描述", f"五点描述均分 {feat_avg:.1f}，处于后 25%（中位 {bullet_q[0.5]:.1f}）。逐条诊断："))
+            advice.append(
+                ("🔴", "五点描述", f"五点描述均分 {feat_avg:.1f}，处于后 25%（中位 {bullet_q[0.5]:.1f}）。逐条诊断："))
             for i, d in enumerate(feat_details):
                 sub_issues = []
                 sub_suggestions = []
@@ -1078,13 +1252,13 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
                     sub_issues.append(f"缺信息维度：{missing_cn}")
                     sub_suggestions.append(f"补充 {missing_cn} 相关信息")
                 if sub_issues:
-                    advice.append(("📌", f"  第{i+1}条", f"{d['text'][:60]}... → 问题：{'；'.join(sub_issues)}。建议：{'；'.join(sub_suggestions[:2])}"))
-                    # ----- 新增：生成具体改写示例 -----
-                    # 基于缺失维度构造一个简单的改写句子
+                    advice.append(("📌", f"  第{i + 1}条",
+                                   f"{d['text'][:60]}... → 问题：{'；'.join(sub_issues)}。建议：{'；'.join(sub_suggestions[:2])}"))
+                    # 生成改写示例
                     orig = d['text']
                     new_sentence = orig
-                    # 如果缺少材质，插入材质占位
-                    if '材质' in missing_cn or not any(kw in orig.lower() for kw in ['material','leder','holz','stahl','stoff']):
+                    if '材质' in missing_cn or not any(
+                            kw in orig.lower() for kw in ['material', 'leder', 'holz', 'stahl', 'stoff']):
                         new_sentence += " Hergestellt aus hochwertigem [Material]."
                     if '尺寸' in missing_cn:
                         new_sentence += " Mit idealen Maßen von [Größe]."
@@ -1094,7 +1268,7 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
                         new_sentence += " Einzigartig im Vergleich zu herkömmlichen Produkten."
                     advice.append(("✏️", f"  改写示例", f"原句：'{orig}'\n建议改写：'{new_sentence}'"))
                 else:
-                    advice.append(("✅", f"  第{i+1}条", f"{d['text'][:60]}... → 结构良好，可保持"))
+                    advice.append(("✅", f"  第{i + 1}条", f"{d['text'][:60]}... → 结构良好，可保持"))
         elif feat_avg < bullet_q[0.5]:
             advice.append(("🟠", "五点描述", f"五点描述均分 {feat_avg:.1f}，低于中位（{bullet_q[0.5]:.1f}）。整体建议："))
             if avg_fab < 2:
@@ -1116,7 +1290,8 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
             comp_prices = competitors['price_value'].dropna().tolist()
             if comp_prices:
                 comp_avg = sum(comp_prices) / len(comp_prices)
-                advice.append(("🔴", "价格", f"价格 {new_price}€ 处于后 25%（百分位 {price_score}），最相似竞品均价 {comp_avg:.2f}€，建议降价至 {comp_avg * 0.95:.2f}€ 以下"))
+                advice.append(("🔴", "价格",
+                               f"价格 {new_price}€ 处于后 25%（百分位 {price_score}），最相似竞品均价 {comp_avg:.2f}€，建议降价至 {comp_avg * 0.95:.2f}€ 以下"))
             else:
                 advice.append(("🔴", "价格", f"价格竞争力处于后 25%（百分位 {price_score}），建议调价"))
         else:
@@ -1129,7 +1304,8 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
     # 信任
     trust_q = benchmarks['trust_score']
     if trust_score_val < trust_q[0.25]:
-        advice.append(("🔴", "信任", f"信任分 {trust_score_val}，处于后 25%。建议：1) Vine 计划；2) 30 天退货；3) 突出售后保障"))
+        advice.append(
+            ("🔴", "信任", f"信任分 {trust_score_val}，处于后 25%。建议：1) Vine 计划；2) 30 天退货；3) 突出售后保障"))
     elif trust_score_val < trust_q[0.5]:
         advice.append(("🟠", "信任", f"信任分 {trust_score_val}，低于中位。建议加强售后政策展示"))
     else:
@@ -1187,7 +1363,8 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
         comp_advice_lines = []
         for _, c in competitors.iterrows():
             title_short = (c.get('title') or '')[:50]
-            comp_advice_lines.append(f"  • ASIN {c['asin']} | {title_short} | 价格 {c.get('price_value', 'N/A')}€ | 总分 {c.get('Total_Score', 0):.1f}")
+            comp_advice_lines.append(
+                f"  • ASIN {c['asin']} | {title_short} | 价格 {c.get('price_value', 'N/A')}€ | 总分 {c.get('Total_Score', 0):.1f}")
         best_comp = competitors.iloc[0]
         new_total = (title_score_val + feat_avg + trust_score_val) / 3
         comp_total = (best_comp.get('title_score', 0) + best_comp.get('bullet_score', 0) +
@@ -1198,12 +1375,14 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
             if best_comp.get('title_score', 0) > title_score_val + 10: gap_dims.append("标题关键词更全")
             if best_comp.get('image_score', 0) > 50: gap_dims.append("图片更丰富")
             if gap_dims:
-                advice.append(("🎯", "竞品学习", f"最相似竞品 {best_comp['asin']} 总分 {best_comp.get('Total_Score', 0):.1f}，可借鉴：{'、'.join(gap_dims)}"))
+                advice.append(("🎯", "竞品学习",
+                               f"最相似竞品 {best_comp['asin']} 总分 {best_comp.get('Total_Score', 0):.1f}，可借鉴：{'、'.join(gap_dims)}"))
         advice.append(("📋", "Top3 竞品", "\n".join(comp_advice_lines)))
 
     return advice
 
-# ==================== 新品分析入口（原函数，增加 full_df 传递）====================
+
+# ==================== 新品分析入口（修改：支持 full_df 传递）====================
 def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
                               new_features, has_aplus, has_brandstory,
                               video_count, full_df, classifier_text2score=None,
@@ -1250,7 +1429,8 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
                                  'info_hit': info_hit, 'info_score': round(info_score, 2),
                                  'has_user_mention': bool(re.search(r'\b(sie|ihnen|ihr|you|your)\b', feat.lower())),
                                  'has_differentiation': any(w in feat.lower() for w in
-                                     ['unique', 'different', 'exclusive', 'only', 'best', 'einzigartig', 'exklusiv', 'beste']),
+                                                            ['unique', 'different', 'exclusive', 'only', 'best',
+                                                             'einzigartig', 'exklusiv', 'beste']),
                                  'length': len(feat)})
     else:
         feat_avg = 0
@@ -1291,15 +1471,14 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
                 ('转化得分', round(conv_score, 2), 'Conversion_Score'),
                 ('综合总分', round(total_score, 2), 'Total_Score')]
     compare_df = pd.DataFrame([{'维度': name, '新品得分': val,
-                                 '数据集 P25': benchmarks[col][0.25], '数据集 P50（中位）': benchmarks[col][0.5],
-                                 '数据集 P75': benchmarks[col][0.75], 'vs 中位': round(val - benchmarks[col][0.5], 2),
-                                 '位置': _quantile_position(val, benchmarks[col])} for name, val, col in dim_rows])
-    # 传入 full_df 到建议生成函数
+                                '数据集 P25': benchmarks[col][0.25], '数据集 P50（中位）': benchmarks[col][0.5],
+                                '数据集 P75': benchmarks[col][0.75], 'vs 中位': round(val - benchmarks[col][0.5], 2),
+                                '位置': _quantile_position(val, benchmarks[col])} for name, val, col in dim_rows])
     advice = _generate_smart_advice(new_title, new_features, features_list, feat_details, title_details,
-                                     title_score_val, price_score, trust_score_val, feat_avg, vid_s, aplus_score,
-                                     has_aplus, has_brandstory, video_count, new_stars, new_reviews,
-                                     benchmarks, competitors, img_avg=img_avg, img_source=img_source,
-                                     image_analysis_result=image_analysis_result, full_df=full_df)
+                                    title_score_val, price_score, trust_score_val, feat_avg, vid_s, aplus_score,
+                                    has_aplus, has_brandstory, video_count, new_stars, new_reviews,
+                                    benchmarks, competitors, img_avg=img_avg, img_source=img_source,
+                                    image_analysis_result=image_analysis_result, full_df=full_df)
     return {'compare_df': compare_df, 'advice': advice, 'competitors': competitors,
             'scores': {'title': title_score_val, 'price': price_score, 'trust': trust_score_val,
                        'bullet': round(feat_avg, 2), 'image': round(img_avg, 2), 'video': vid_s,
@@ -1311,9 +1490,10 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
             'all_ranked': all_ranked,
             'has_image_sim': new_img_emb is not None and bool(dataset_image_embeddings)}
 
-# ==================== Streamlit UI（保持不变）====================
+
+# ==================== Streamlit UI ====================
 st.title("📊 Amazon 产品竞争力分析 v3.1")
-st.caption("🚀 快速层(关键词) + 深度层(CLIP 按需) | 新增：双语检测、高频词参考、改写示例")
+st.caption("🚀 快速层(关键词) + 深度层(CLIP 按需) | 新增：双语检测、高频词参考、改写示例、单价自动计算")
 
 with st.sidebar:
     st.header("⚙️ 分析选项")
@@ -1322,15 +1502,15 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**图片分析模式**")
     enable_clip_batch = st.checkbox("🚀 批量分析时启用 CLIP（每产品 1主图+2详情+2A+图）",
-                                     value=False,
-                                     help="开启后图片得分基于真实 CLIP 分析，100 产品约 5-10 分钟。关闭时图片得分=50（固定），分析 30 秒完成。")
+                                    value=False,
+                                    help="开启后图片得分基于真实 CLIP 分析，100 产品约 5-10 分钟。关闭时图片得分=50（固定），分析 30 秒完成。")
     if enable_clip_batch:
         st.caption("⏱️ 预计耗时：100 产品约 5-10 分钟（首次），已分析则秒级返回")
     else:
         st.caption("⏱️ 预计耗时：100 产品约 30 秒")
     st.markdown("---")
     enable_deep_single = st.checkbox("启用单 ASIN CLIP 深度分析", value=False,
-                                      help="开启后，选择 ASIN 时会加载 CLIP 模型分析图片（每个 ASIN 约 5-10 秒）")
+                                     help="开启后，选择 ASIN 时会加载 CLIP 模型分析图片（每个 ASIN 约 5-10 秒）")
     st.markdown("---")
     st.markdown("**关于性能**")
     st.markdown("- 快速层：纯关键词+数字，无 NLP 模型")
@@ -1358,19 +1538,25 @@ if uploaded_file is not None:
         cached = pd.read_parquet(cache_file)
         if not cached.empty:
             final_df = cached[cached['asin'].notna()][['asin', 'title', 'brand', 'search_score',
-                                                         'Detail_Conversion', 'Total_Score', 'listing_score',
-                                                         'Conversion_Score', 'search_rank', 'price_value',
-                                                         'stars', 'reviews']].copy() if 'asin' in cached.columns else cached
+                                                       'Detail_Conversion', 'Total_Score', 'listing_score',
+                                                       'Conversion_Score', 'search_rank', 'price_value',
+                                                       'unit_price', 'quantity', 'stars',
+                                                       'reviews']].copy() if 'asin' in cached.columns else cached
             full_df = cached
         st.toast("💾 已从缓存加载", icon="✅")
     if final_df is None:
         progress_bar = st.progress(0, text="开始分析...")
         status = st.empty()
+
+
         def progress_callback(p, msg):
             progress_bar.progress(p, text=msg)
             status.text(f"{msg} ({p}%)")
+
+
         with st.spinner("运行分析流水线..."):
-            final_df, full_df, clip_results = run_fast_analysis(classified_data, max_items, progress_callback, enable_clip=enable_clip_batch)
+            final_df, full_df, clip_results = run_fast_analysis(classified_data, max_items, progress_callback,
+                                                                enable_clip=enable_clip_batch)
         progress_bar.empty()
         status.empty()
         if use_cache and full_df is not None and not full_df.empty:
@@ -1386,9 +1572,29 @@ if uploaded_file is not None:
     st.subheader("📋 产品竞争力排名")
     final_df_display = final_df.copy()
     final_df_display['商品链接'] = final_df_display['asin'].apply(lambda x: f'https://www.amazon.de/dp/{x}')
-    st.dataframe(final_df_display, column_config={
-        "商品链接": st.column_config.LinkColumn("详情页", display_text=r'^(https://www\.amazon\.de/dp/)(.*)'),
-        "asin": None}, width='stretch', hide_index=True)
+    # 调整列顺序，把数量、单价放在价格附近
+    cols = final_df_display.columns.tolist()
+    # 确保 quantity 和 unit_price 在 DataFrame 中
+    # 重新排序列
+    order = ["asin", "title", "brand", "price_value", "unit_price", "quantity", "search_score", "Detail_Conversion",
+             "Total_Score", "listing_score", "Conversion_Score", "search_rank", "stars", "reviews", "商品链接"]
+    # 仅保留存在的列
+    order = [c for c in order if c in cols]
+    # 补充其他列（如果有）
+    extra = [c for c in cols if c not in order]
+    final_df_display = final_df_display[order + extra]
+    st.dataframe(
+        final_df_display,
+        column_config={
+            "商品链接": st.column_config.LinkColumn("详情页", display_text=r'^(https://www\.amazon\.de/dp/)(.*)'),
+            "price_value": st.column_config.NumberColumn("总价 (€)", format="%.2f"),
+            "unit_price": st.column_config.NumberColumn("单价 (€)", format="%.2f"),
+            "quantity": st.column_config.NumberColumn("数量", format="%d"),
+            "asin": None,
+        },
+        width='stretch',
+        hide_index=True
+    )
     csv = final_df.to_csv(index=False, encoding="utf-8-sig")
     st.download_button("📥 下载结果 CSV", data=csv, file_name="product_competitiveness_final.csv", mime="text/csv")
     st.subheader("📈 数据可视化")
@@ -1419,15 +1625,28 @@ if uploaded_file is not None:
         with col_radar:
             st.markdown("**📊 雷达图**")
             fig = go.Figure()
-            fig.add_trace(go.Scatterpolar(r=[row[c] for c in available_cols], theta=available_cols, fill='toself', name=selected_asin))
-            fig.add_trace(go.Scatterpolar(r=[medians[c] for c in available_cols], theta=available_cols, fill='toself', name='中位数'))
+            fig.add_trace(go.Scatterpolar(r=[row[c] for c in available_cols], theta=available_cols, fill='toself',
+                                          name=selected_asin))
+            fig.add_trace(go.Scatterpolar(r=[medians[c] for c in available_cols], theta=available_cols, fill='toself',
+                                          name='中位数'))
             fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=True, height=400)
             st.plotly_chart(fig, use_container_width=True)
         with col_table:
             st.markdown("**📈 各维度详情**")
-            detail_df = pd.DataFrame({'维度': available_cols, '本品': [row[c] for c in available_cols],
-                                       '中位': [medians[c] for c in available_cols],
-                                       '差值': [round(row[c] - medians[c], 2) for c in available_cols]})
+            # 添加单价和数量
+            detail_data = {'维度': available_cols, '本品': [row[c] for c in available_cols],
+                           '中位': [medians[c] for c in available_cols],
+                           '差值': [round(row[c] - medians[c], 2) for c in available_cols]}
+            # 额外显示单价和数量
+            if 'unit_price' in row and 'quantity' in row:
+                detail_data['维度'] += ['单价 (€)', '数量']
+                detail_data['本品'] += [row['unit_price'], row['quantity']]
+                detail_data['中位'] += [full_df['unit_price'].median() if 'unit_price' in full_df else None,
+                                        full_df['quantity'].median() if 'quantity' in full_df else None]
+                detail_data['差值'] += [
+                    row['unit_price'] - (full_df['unit_price'].median() if 'unit_price' in full_df else 0),
+                    row['quantity'] - (full_df['quantity'].median() if 'quantity' in full_df else 0)]
+            detail_df = pd.DataFrame(detail_data)
             st.dataframe(detail_df, hide_index=True, use_container_width=True)
         # 单品 CLIP 深度分析
         if enable_deep_single:
@@ -1489,7 +1708,7 @@ if uploaded_file is not None:
         st.markdown("**🖼️ 上传产品图片（可选）**")
         st.caption("上传主图后启用 CLIP 真实图片诊断 + 视觉相似竞品匹配")
         uploaded_images = st.file_uploader("选择图片（jpg/png/webp）", type=['jpg', 'jpeg', 'png', 'webp'],
-                                            accept_multiple_files=True, key="new_product_images")
+                                           accept_multiple_files=True, key="new_product_images")
         if uploaded_images and len(uploaded_images) > 6:
             st.warning("⚠️ 最多 6 张，已截取前 6 张")
             uploaded_images = uploaded_images[:6]
@@ -1500,9 +1719,13 @@ if uploaded_file is not None:
             for i, img_file in enumerate(uploaded_images):
                 with type_cols[i % 3]:
                     default_type = 'main' if i == 0 else ('detail' if i <= 3 else 'lifestyle')
-                    img_type = st.selectbox(f"图 {i+1}: {img_file.name[:20]}", options=['main', 'detail', 'lifestyle', 'aplus'],
-                        format_func=lambda x: {'main': '主图（白底）', 'detail': '细节图', 'lifestyle': '场景图', 'aplus': 'A+图'}[x],
-                        index=['main', 'detail', 'lifestyle', 'aplus'].index(default_type), key=f"img_type_{i}")
+                    img_type = st.selectbox(f"图 {i + 1}: {img_file.name[:20]}",
+                                            options=['main', 'detail', 'lifestyle', 'aplus'],
+                                            format_func=lambda x:
+                                            {'main': '主图（白底）', 'detail': '细节图', 'lifestyle': '场景图',
+                                             'aplus': 'A+图'}[x],
+                                            index=['main', 'detail', 'lifestyle', 'aplus'].index(default_type),
+                                            key=f"img_type_{i}")
                     image_types_list.append(img_type)
         submitted = st.form_submit_button("📊 分析新品竞争力", type="primary")
     if submitted:
@@ -1516,7 +1739,8 @@ if uploaded_file is not None:
                 with st.spinner("🖼️ 加载 CLIP 模型并分析上传图片（首次约 30 秒）..."):
                     try:
                         img_bytes_list = [f.getvalue() for f in uploaded_images]
-                        image_analysis_result = analyze_uploaded_images_with_clip(tuple(img_bytes_list), tuple(image_types_list))
+                        image_analysis_result = analyze_uploaded_images_with_clip(tuple(img_bytes_list),
+                                                                                  tuple(image_types_list))
                         if image_analysis_result:
                             st.success(f"✅ 图片分析完成，综合得分 {image_analysis_result['overall_score']:.1f}")
                     except Exception as e:
@@ -1541,11 +1765,11 @@ if uploaded_file is not None:
                                 dataset_image_embeddings = None
             with st.spinner("智能分析中..."):
                 result = analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
-                    new_features, has_aplus, has_brandstory, video_count, full_df,
-                    image_analysis_result=image_analysis_result,
-                    dataset_image_embeddings=dataset_image_embeddings,
-                    thumbnail_urls_map=thumbnail_urls_map,
-                    top_n_competitors=top_n_competitors)
+                                                   new_features, has_aplus, has_brandstory, video_count, full_df,
+                                                   image_analysis_result=image_analysis_result,
+                                                   dataset_image_embeddings=dataset_image_embeddings,
+                                                   thumbnail_urls_map=thumbnail_urls_map,
+                                                   top_n_competitors=top_n_competitors)
             st.subheader("📊 新品 vs 数据集 分位数对比")
             st.dataframe(result['compare_df'], hide_index=True, use_container_width=True)
             st.caption("🟢 前25% / 🟡 中上 / 🟠 中下 / 🔴 后25%")
@@ -1553,7 +1777,7 @@ if uploaded_file is not None:
             score_cols = st.columns(4)
             scores = result['scores']
             for i, (name, val) in enumerate([('综合总分', scores['total']), ('搜索得分', scores['search']),
-                                              ('详情得分', scores['listing']), ('转化得分', scores['conversion'])]):
+                                             ('详情得分', scores['listing']), ('转化得分', scores['conversion'])]):
                 with score_cols[i]:
                     st.metric(name, f"{val:.1f}")
             st.subheader("💡 智能优化建议")
@@ -1591,7 +1815,7 @@ if uploaded_file is not None:
                 fig_img = go.Figure()
                 fig_img.add_trace(go.Scatterpolar(r=dim_vals, theta=dim_names, fill='toself', name='新品图片'))
                 fig_img.add_trace(go.Scatterpolar(r=[50] * len(FEATURE_NAMES), theta=dim_names,
-                                                    fill='toself', name='基线(50)', line=dict(dash='dot', color='gray')))
+                                                  fill='toself', name='基线(50)', line=dict(dash='dot', color='gray')))
                 fig_img.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
                                       showlegend=True, height=450)
                 st.plotly_chart(fig_img, use_container_width=True)
@@ -1628,14 +1852,18 @@ if uploaded_file is not None:
                     with img_compare_cols[0]:
                         st.markdown("**🆕 新品主图**")
                         if main_idx is not None and uploaded_images and main_idx < len(uploaded_images):
-                            try: st.image(Image.open(uploaded_images[main_idx]), use_container_width=True)
-                            except: st.warning("主图预览失败")
+                            try:
+                                st.image(Image.open(uploaded_images[main_idx]), use_container_width=True)
+                            except:
+                                st.warning("主图预览失败")
                         else:
                             found = False
                             for i, img_file in enumerate(uploaded_images or []):
                                 if image_types_list[i] == 'main':
-                                    try: st.image(Image.open(img_file), use_container_width=True); found = True
-                                    except: st.warning("主图预览失败")
+                                    try:
+                                        st.image(Image.open(img_file), use_container_width=True); found = True
+                                    except:
+                                        st.warning("主图预览失败")
                                     break
                             if not found: st.info("未找到主图")
                     for idx, (_, comp) in enumerate(result['competitors'].head(n_show).iterrows()):
@@ -1643,50 +1871,65 @@ if uploaded_file is not None:
                             asin = comp['asin']
                             sim_score = comp.get('sim', 0)
                             img_sim = comp.get('image_sim')
-                            sim_label = f"相似度 {sim_score*100:.0f}%"
+                            sim_label = f"相似度 {sim_score * 100:.0f}%"
                             if img_sim is not None and not pd.isna(img_sim):
-                                sim_label += f"\n\n图片 {img_sim*100:.0f}%"
-                            st.markdown(f"**#{idx+1} {asin}**\n\n{sim_label}")
+                                sim_label += f"\n\n图片 {img_sim * 100:.0f}%"
+                            st.markdown(f"**#{idx + 1} {asin}**\n\n{sim_label}")
                             url = thumbnail_urls_map.get(asin)
                             if url:
-                                try: st.image(url, use_container_width=True)
-                                except: st.warning("竞品图加载失败")
-                            else: st.info("无主图")
+                                try:
+                                    st.image(url, use_container_width=True)
+                                except:
+                                    st.warning("竞品图加载失败")
+                            else:
+                                st.info("无主图")
                     st.markdown("")
                 st.markdown(f"**📊 {n_comp} 个竞品详细对比**")
                 if result.get('has_image_sim'):
                     comp_display = result['competitors'][['asin', 'title', 'brand', 'price_value',
-                                                          'Total_Score', 'sim', 'image_sim', 'title_sim', 'price_sim']].copy()
+                                                          'Total_Score', 'sim', 'image_sim', 'title_sim',
+                                                          'price_sim']].copy()
                     comp_display['排名'] = range(1, len(comp_display) + 1)
-                    comp_display['综合相似度'] = comp_display['sim'].apply(lambda x: f"{x*100:.1f}%")
-                    comp_display['图片相似'] = comp_display['image_sim'].apply(lambda x: f"{x*100:.1f}%" if x is not None and not pd.isna(x) else "—")
-                    comp_display['标题相似'] = comp_display['title_sim'].apply(lambda x: f"{x*100:.1f}%")
-                    comp_display['价格相似'] = comp_display['price_sim'].apply(lambda x: f"{x*100:.1f}%")
+                    comp_display['综合相似度'] = comp_display['sim'].apply(lambda x: f"{x * 100:.1f}%")
+                    comp_display['图片相似'] = comp_display['image_sim'].apply(
+                        lambda x: f"{x * 100:.1f}%" if x is not None and not pd.isna(x) else "—")
+                    comp_display['标题相似'] = comp_display['title_sim'].apply(lambda x: f"{x * 100:.1f}%")
+                    comp_display['价格相似'] = comp_display['price_sim'].apply(lambda x: f"{x * 100:.1f}%")
                     comp_display = comp_display.drop(columns=['sim', 'image_sim', 'title_sim', 'price_sim'])
-                    comp_display = comp_display.rename(columns={'title': '标题', 'brand': '品牌', 'price_value': '价格(€)', 'Total_Score': '综合分'})
-                    comp_display = comp_display[['排名', 'asin', '标题', '品牌', '价格(€)', '综合分', '综合相似度', '图片相似', '标题相似', '价格相似']]
+                    comp_display = comp_display.rename(
+                        columns={'title': '标题', 'brand': '品牌', 'price_value': '价格(€)', 'Total_Score': '综合分'})
+                    comp_display = comp_display[
+                        ['排名', 'asin', '标题', '品牌', '价格(€)', '综合分', '综合相似度', '图片相似', '标题相似',
+                         '价格相似']]
                 else:
                     comp_display = result['competitors'][['asin', 'title', 'brand', 'price_value',
                                                           'Total_Score', 'sim', 'title_sim', 'price_sim']].copy()
                     comp_display['排名'] = range(1, len(comp_display) + 1)
-                    comp_display['综合相似度'] = comp_display['sim'].apply(lambda x: f"{x*100:.1f}%")
-                    comp_display['标题相似'] = comp_display['title_sim'].apply(lambda x: f"{x*100:.1f}%")
-                    comp_display['价格相似'] = comp_display['price_sim'].apply(lambda x: f"{x*100:.1f}%")
+                    comp_display['综合相似度'] = comp_display['sim'].apply(lambda x: f"{x * 100:.1f}%")
+                    comp_display['标题相似'] = comp_display['title_sim'].apply(lambda x: f"{x * 100:.1f}%")
+                    comp_display['价格相似'] = comp_display['price_sim'].apply(lambda x: f"{x * 100:.1f}%")
                     comp_display = comp_display.drop(columns=['sim', 'title_sim', 'price_sim'])
-                    comp_display = comp_display.rename(columns={'title': '标题', 'brand': '品牌', 'price_value': '价格(€)', 'Total_Score': '综合分'})
-                    comp_display = comp_display[['排名', 'asin', '标题', '品牌', '价格(€)', '综合分', '综合相似度', '标题相似', '价格相似']]
+                    comp_display = comp_display.rename(
+                        columns={'title': '标题', 'brand': '品牌', 'price_value': '价格(€)', 'Total_Score': '综合分'})
+                    comp_display = comp_display[
+                        ['排名', 'asin', '标题', '品牌', '价格(€)', '综合分', '综合相似度', '标题相似', '价格相似']]
                 comp_display['详情页'] = comp_display['asin'].apply(lambda x: f'https://www.amazon.de/dp/{x}')
                 st.dataframe(comp_display, hide_index=True, use_container_width=True,
-                             column_config={"详情页": st.column_config.LinkColumn("Amazon", display_text=r'^(https://www\.amazon\.de/dp/)(.*)')})
+                             column_config={"详情页": st.column_config.LinkColumn("Amazon",
+                                                                                  display_text=r'^(https://www\.amazon\.de/dp/)(.*)')})
                 if result.get('all_ranked') is not None and not result['all_ranked'].empty:
                     total_n = len(result['all_ranked'])
                     with st.expander(f"📊 查看数据集全部 {total_n} 个产品的相似度排名"):
-                        all_disp = result['all_ranked'][['asin', 'title', 'price_value', 'Total_Score', 'sim', 'image_sim']].copy()
+                        all_disp = result['all_ranked'][
+                            ['asin', 'title', 'price_value', 'Total_Score', 'sim', 'image_sim']].copy()
                         all_disp['排名'] = range(1, len(all_disp) + 1)
-                        all_disp['综合相似度'] = all_disp['sim'].apply(lambda x: f"{x*100:.1f}%")
-                        all_disp['图片相似度'] = all_disp['image_sim'].apply(lambda x: f"{x*100:.1f}%" if x is not None and not pd.isna(x) else "—")
-                        all_disp = all_disp[['排名', 'asin', 'title', 'price_value', 'Total_Score', '综合相似度', '图片相似度']]
-                        all_disp = all_disp.rename(columns={'title': '标题', 'price_value': '价格(€)', 'Total_Score': '综合分'})
+                        all_disp['综合相似度'] = all_disp['sim'].apply(lambda x: f"{x * 100:.1f}%")
+                        all_disp['图片相似度'] = all_disp['image_sim'].apply(
+                            lambda x: f"{x * 100:.1f}%" if x is not None and not pd.isna(x) else "—")
+                        all_disp = all_disp[
+                            ['排名', 'asin', '标题', 'price_value', 'Total_Score', '综合相似度', '图片相似度']]
+                        all_disp = all_disp.rename(
+                            columns={'title': '标题', 'price_value': '价格(€)', 'Total_Score': '综合分'})
                         st.dataframe(all_disp, hide_index=True, use_container_width=True)
 else:
     st.info("👈 请上传原始爬虫 JSON 文件开始分析")
@@ -1705,4 +1948,5 @@ else:
     - 双语检测（英德同时识别）
     - 高频词参考（基于数据集）
     - 五点描述改写示例
+    - **新增：自动从标题/attributes 提取套装数量，计算并显示单价**
     """)
