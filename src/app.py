@@ -766,7 +766,8 @@ def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_c
     # ========== 搜索页评分（使用单价） ==========
     t_search = time.time()
     # 提取所有产品的单价（优先 unitPrice，否则用总价）
-    unit_prices = []
+    # 构建有效单价列表（用于价格百分位排名）
+    valid_unit_prices = []
     for item in search_list:
         price_data = item.get("price")
         if isinstance(price_data, dict):
@@ -774,9 +775,27 @@ def run_fast_analysis(classified_data, limit=0, progress_callback=None, enable_c
             if unit is None:
                 unit = price_data.get("value")
         else:
-            unit = price_data  # 直接数值
-        if unit is not None:
-            unit_prices.append(unit)
+            unit = price_data
+        if unit is not None and unit > 0:
+            valid_unit_prices.append(unit)
+    unit_price = None
+    price_data = item.get("price")
+    if isinstance(price_data, dict):
+        price = price_data.get("value")
+        unit_price = price_data.get("unitPrice", price)  # 优先 unitPrice
+    else:
+        price = price_data
+        unit_price = price_data
+
+    # 价格得分：基于单价
+    if unit_price is not None and valid_unit_prices:
+        rank = sum(x > unit_price for x in valid_unit_prices)
+        price_score = round(rank / len(valid_unit_prices) * 100, 2)
+    elif price is not None and valid_prices:  # 回退总价
+        rank = sum(x > price for x in valid_prices)
+        price_score = round(rank / len(valid_prices) * 100, 2)
+    else:
+        price_score = 50
 
     search_results = []
     for idx, item in enumerate(search_list):
@@ -932,9 +951,14 @@ def find_top_competitors(full_df, new_title, new_price, top_n=3,
     # 价格相似度基于单价
     if new_price and 'unit_price' in df.columns:
         prices = df['unit_price'].dropna()
+        # 若单价全空，回退至总价
+        if len(prices) == 0 and 'price_value' in df.columns:
+            prices = df['price_value'].dropna()
         if len(prices) > 0:
             price_range = max(prices.max() - prices.min(), 1)
-            df['price_sim'] = 1 - (df['unit_price'].fillna(prices.mean()) - new_price).abs() / price_range
+            # 对于缺失 unit_price 的行，用 price_value 填充（若存在）
+            price_series = df['unit_price'].fillna(df['price_value'])
+            df['price_sim'] = 1 - (price_series.fillna(new_price) - new_price).abs() / price_range
         else:
             df['price_sim'] = 0.5
     else:
@@ -1196,15 +1220,15 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
             if comp_prices:
                 comp_avg = sum(comp_prices) / len(comp_prices)
                 advice.append(("🔴", "价格",
-                               f"单价 {new_price}€ 处于后 25%（百分位 {price_score}），最相似竞品均价 {comp_avg:.2f}€，建议降至 {comp_avg * 0.95:.2f}€ 以下"))
+                               f"单价 {new_unit_price:.2f}€ 处于后 25%（百分位 {price_score}），最相似竞品均价 {comp_avg:.2f}€/件，建议降至 {comp_avg * 0.95:.2f}€/件 以下"))
             else:
                 advice.append(("🔴", "价格", f"单价竞争力处于后 25%（百分位 {price_score}），建议调价"))
         else:
             advice.append(("🔴", "价格", f"单价竞争力处于后 25%（百分位 {price_score}），建议调价"))
     elif price_score > price_q[0.75]:
-        advice.append(("🟢", "价格", f"单价优势明显（百分位 {price_score}，前 25%）"))
+        advice.append(("🟢", "价格", f"单价 {new_unit_price:.2f}€ 优势明显（百分位 {price_score}，前 25%）"))
     else:
-        advice.append(("🟡", "价格", f"单价处于中位水平（百分位 {price_score}）"))
+        advice.append(("🟡", "价格", f"单价 {new_unit_price:.2f}€ 处于中位水平（百分位 {price_score}）"))
 
     # ========== 信任 ==========
     trust_q = benchmarks['trust_score']
@@ -1294,7 +1318,10 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
                               image_analysis_result=None,
                               dataset_image_embeddings=None,
                               thumbnail_urls_map=None,
-                              top_n_competitors=5):
+                              top_n_competitors=5,
+                              new_quantity=1):   # 新增
+    # 计算单价
+    new_unit_price = new_price / new_quantity if new_quantity > 0 else new_price
     qs = (0.25, 0.5, 0.75)
     benchmarks = {
         'title_score': compute_quantiles(full_df.get('title_score', pd.Series()), qs),
@@ -1313,8 +1340,8 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
 
     # 价格得分基于单价
     price_values = full_df['unit_price'].dropna().tolist() if 'unit_price' in full_df.columns else []
-    if price_values and new_price:
-        rank = sum(x > new_price for x in price_values)
+    if price_values and new_unit_price:
+        rank = sum(x > new_unit_price for x in price_values)
         price_score = round(rank / len(price_values) * 100, 2)
     else:
         price_score = 50
