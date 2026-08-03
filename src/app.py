@@ -213,8 +213,8 @@ def load_clip():
     print("🖼️ 加载 CLIP 模型...")
     import torch
     from transformers import CLIPProcessor, CLIPModel
-    model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-    processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+    model = CLIPModel.from_pretrained("openai/clip-vit-base-patch16")
+    processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch16")
     model.eval()
     print("✅ CLIP 加载完成")
     return model, processor
