@@ -29,10 +29,17 @@ import plotly.graph_objects as go
 import plotly.express as px
 import matplotlib.pyplot as plt
 from collections import Counter
-from rembg import remove
-from PIL import Image
 import torch
 import numpy as np
+
+# ---------- 可选依赖：rembg（如果未安装，降级为无外观模式） ----------
+try:
+    from rembg import remove
+    HAS_REMBG = True
+except ImportError:
+    remove = None
+    HAS_REMBG = False
+    print("⚠️ rembg 未安装，外观匹配功能将禁用。如需启用请 pip install rembg")
 
 # ==================== 页面配置 ====================
 st.set_page_config(page_title="Amazon 产品竞争力分析 v3.1", layout="wide", page_icon="📊")
@@ -240,6 +247,7 @@ def load_clip():
     model.eval()
     print("✅ CLIP 加载完成")
     return model, processor
+
 @st.cache_resource
 def load_dinov2():
     print("📦 加载 DINOv2 外观模型...")
@@ -269,7 +277,11 @@ TEXT_PROMPTS = list(LABELS.values())
 def extract_product_appearance_embedding(image_bytes):
     """
     真正的“产品外观”向量：先抠掉背景，再用 DINOv2 提取形状/纹理特征
+    如果 rembg 不可用或失败，返回 None
     """
+    if not HAS_REMBG or remove is None:
+        print("⚠️ rembg 未安装，跳过外观提取")
+        return None
     try:
         # 1. 加载原图
         img = Image.open(BytesIO(image_bytes)).convert("RGB")
@@ -300,6 +312,7 @@ def extract_product_appearance_embedding(image_bytes):
     except Exception as e:
         print(f"⚠️ 外观向量提取失败: {e}")
         return None
+
 
 def calculate_consumer_score(features, image_type):
     if image_type == "thumbnail":
@@ -1439,6 +1452,7 @@ def _generate_smart_advice(new_title, new_features, features_list, feat_details,
     return advice
 
 
+# [CHANGE] 新增参数 new_appearance_emb 和 dataset_appearance_embeddings
 def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
                               new_features, has_aplus, has_brandstory,
                               video_count, full_df, new_quantity=1,
@@ -1446,7 +1460,9 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
                               image_analysis_result=None,
                               dataset_image_embeddings=None,
                               thumbnail_urls_map=None,
-                              top_n_competitors=5):
+                              top_n_competitors=5,
+                              new_appearance_emb=None,
+                              dataset_appearance_embeddings=None):
     qs = (0.25, 0.5, 0.75)
     benchmarks = {
         'title_score': compute_quantiles(full_df.get('title_score', pd.Series()), qs),
@@ -1533,19 +1549,17 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
     detail_conversion = 0.6 * listing_score + 0.4 * conv_score
     total_score = 0.5 * search_score + 0.5 * detail_conversion
 
-    
-    # ----- 竞品匹配（暂时不使用图片外观，仅标题+价格）-----
-    # 未来若启用 DINOv2 外观向量，只需传入 new_appearance_emb 和 dataset_appearance_embeddings 并调整权重
+    # [CHANGE] 调用 find_top_competitors 并传入外观向量及权重
     competitors, all_ranked = find_top_competitors(
         full_df,
         new_unit_price,
         new_title or "",
         top_n=top_n_competitors,
-        new_appearance_emb=None,  # 暂时无外观向量
-        dataset_appearance_embeddings=None,  # 暂时无数据集外观向量
-        title_weight=0.70,  # 标题主导
-        appearance_weight=0.0,  # 外观暂时不用
-        price_weight=0.30  # 价格辅助
+        new_appearance_emb=new_appearance_emb,
+        dataset_appearance_embeddings=dataset_appearance_embeddings,
+        title_weight=0.40,      # 标题权重 40%
+        appearance_weight=0.40, # 外观权重 40%
+        price_weight=0.20       # 价格权重 20%
     )
 
     dim_rows = [('标题得分', title_score_val, 'title_score'), ('价格得分', price_score, 'price_score'),
@@ -1567,6 +1581,9 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
                                     image_analysis_result=image_analysis_result, full_df=full_df,
                                     new_unit_price=new_unit_price)
 
+    # [CHANGE] 更新 has_image_sim：基于外观向量是否存在
+    has_image_sim = (new_appearance_emb is not None) and (dataset_appearance_embeddings is not None)
+
     return {'compare_df': compare_df, 'advice': advice, 'competitors': competitors,
             'scores': {'title': title_score_val, 'price': price_score, 'trust': trust_score_val,
                        'bullet': round(feat_avg, 2), 'image': round(img_avg, 2), 'video': vid_s,
@@ -1576,7 +1593,7 @@ def analyze_new_product_smart(new_title, new_price, new_stars, new_reviews,
             'feat_details': feat_details, 'title_details': title_details,
             'image_analysis': image_analysis_result, 'img_source': img_source,
             'all_ranked': all_ranked,
-            'has_image_sim': new_img_emb is not None and bool(dataset_image_embeddings)}
+            'has_image_sim': has_image_sim}  # 正确赋值
 
 
 # ==================== Streamlit UI ====================
@@ -1787,7 +1804,7 @@ if uploaded_file is not None:
             video_count = st.selectbox("视频数量", [0, 1, 2, 3, 5], index=0)
             top_n_competitors = st.slider("🎯 找多少个相似竞品", min_value=3, max_value=10, value=5, step=1)
         st.markdown("**🖼️ 上传产品图片（可选）**")
-        st.caption("上传主图后启用 CLIP 真实图片诊断 + 视觉相似竞品匹配")
+        st.caption("上传主图后启用 CLIP 真实图片诊断 + 视觉相似竞品匹配（基于 DINOv2 外观）")
         uploaded_images = st.file_uploader("选择图片（jpg/png/webp）", type=['jpg', 'jpeg', 'png', 'webp'],
                                            accept_multiple_files=True, key="new_product_images")
         if uploaded_images and len(uploaded_images) > 6:
@@ -1817,6 +1834,10 @@ if uploaded_file is not None:
             image_analysis_result = None
             dataset_image_embeddings = None
             thumbnail_urls_map = None
+            # [CHANGE] 新增外观向量相关变量
+            new_appearance_emb = None
+            dataset_appearance_embeddings = None
+
             if uploaded_images:
                 with st.spinner("🖼️ 加载 CLIP 模型并分析上传图片（首次约 30 秒）..."):
                     try:
@@ -1828,7 +1849,21 @@ if uploaded_file is not None:
                     except Exception as e:
                         st.warning(f"图片分析失败: {e}")
                         image_analysis_result = None
-                if image_analysis_result and image_analysis_result.get('main_image_embedding') is not None:
+
+                # [CHANGE] 提取新品主图的外观向量（DINOv2 + rembg）
+                if image_analysis_result:
+                    main_idx = image_analysis_result.get('main_image_index')
+                    if main_idx is not None and main_idx < len(uploaded_images):
+                        main_img_bytes = uploaded_images[main_idx].getvalue()
+                        with st.spinner("🖼️ 提取产品外观特征（去背景+DINOv2）..."):
+                            new_appearance_emb = extract_product_appearance_embedding(main_img_bytes)
+                            if new_appearance_emb is not None:
+                                st.success("✅ 外观特征提取成功")
+                            else:
+                                st.warning("⚠️ 外观特征提取失败，将仅使用标题+价格匹配")
+
+                # 构建数据集主图 URL 列表（用于外观向量）
+                if new_appearance_emb is not None:
                     thumb_urls_list = []
                     thumbnail_urls_map = {}
                     for item in classified_data["搜索页信息"]:
@@ -1838,13 +1873,22 @@ if uploaded_file is not None:
                             thumb_urls_list.append((asin, url))
                             thumbnail_urls_map[asin] = url
                     if thumb_urls_list:
-                        with st.spinner(f"🔍 计算数据集 {len(thumb_urls_list)} 张主图向量..."):
+                        # [CHANGE] 调用新的外观向量计算函数（DINOv2 + rembg）
+                        with st.spinner(f"🖼️ 计算数据集 {len(thumb_urls_list)} 个产品的外观向量（DINOv2）..."):
                             try:
-                                dataset_image_embeddings = compute_dataset_image_embeddings(tuple(thumb_urls_list))
-                                st.success(f"✅ 数据集图片向量完成，{len(dataset_image_embeddings)} 张成功")
+                                # 这里可以限制数量，但函数内已有限制（200）
+                                dataset_appearance_embeddings = compute_dataset_appearance_embeddings(tuple(thumb_urls_list))
+                                st.success(f"✅ 数据集外观向量完成，{len(dataset_appearance_embeddings)} 个成功")
                             except Exception as e:
-                                st.warning(f"数据集图片向量失败: {e}")
-                                dataset_image_embeddings = None
+                                st.warning(f"数据集外观向量失败: {e}")
+                                dataset_appearance_embeddings = None
+                else:
+                    # 如果新品外观向量提取失败，数据集外观也不必计算
+                    dataset_appearance_embeddings = None
+
+                # 如果不需要外观，仍可计算普通 CLIP 向量用于其他显示（可选）
+                # 但外观匹配已用 DINOv2，无需重复计算 CLIP 数据集向量
+                # 如果你还想要 CLIP 的 thumbnail 用于其他目的，可以保留，但这里不强制
 
             with st.spinner("智能分析中..."):
                 result = analyze_new_product_smart(
@@ -1853,9 +1897,11 @@ if uploaded_file is not None:
                     full_df,
                     new_quantity=new_quantity,
                     image_analysis_result=image_analysis_result,
-                    dataset_image_embeddings=dataset_image_embeddings,
+                    dataset_image_embeddings=dataset_image_embeddings,  # 保留但不再用于匹配
                     thumbnail_urls_map=thumbnail_urls_map,
-                    top_n_competitors=top_n_competitors
+                    top_n_competitors=top_n_competitors,
+                    new_appearance_emb=new_appearance_emb,               # [CHANGE] 传入外观向量
+                    dataset_appearance_embeddings=dataset_appearance_embeddings  # [CHANGE] 传入数据集外观向量
                 )
 
             st.subheader("📊 新品 vs 数据集 分位数对比")
@@ -1936,6 +1982,7 @@ if uploaded_file is not None:
                 else:
                     st.info("ℹ️ 未上传新品图片，仅基于标题+价格匹配")
 
+                # [CHANGE] 只有当 has_image_sim 为 True 时才显示视觉对比，且外观向量存在
                 if result.get('has_image_sim') and thumbnail_urls_map:
                     st.markdown(f"**📸 视觉对比（新品 vs Top {min(n_comp, 3)} 竞品）**")
                     n_show = min(n_comp, 3)
@@ -1961,10 +2008,10 @@ if uploaded_file is not None:
                         with img_compare_cols[idx + 1]:
                             asin = comp['asin']
                             sim_score = comp.get('sim', 0)
-                            img_sim = comp.get('image_sim')
+                            img_sim = comp.get('appearance_sim')  # [CHANGE] 使用 appearance_sim 而非 image_sim
                             sim_label = f"相似度 {sim_score * 100:.0f}%"
                             if img_sim is not None and not pd.isna(img_sim):
-                                sim_label += f"\n\n图片 {img_sim * 100:.0f}%"
+                                sim_label += f"\n\n外观 {img_sim * 100:.0f}%"
                             st.markdown(f"**#{idx + 1} {asin}**\n\n{sim_label}")
                             url = thumbnail_urls_map.get(asin)
                             if url:
@@ -1977,17 +2024,18 @@ if uploaded_file is not None:
                     st.markdown("")
 
                 st.markdown(f"**📊 {n_comp} 个竞品详细对比**")
-                if result.get('has_image_sim'):
+                # [CHANGE] 由于新增了 appearance_sim，调整显示
+                if result.get('has_image_sim') and 'appearance_sim' in result['competitors'].columns:
                     comp_display = result['competitors'][['asin', 'title', 'brand', 'price_value', 'unit_price',
-                                                          'Total_Score', 'sim', 'image_sim', 'title_sim',
+                                                          'Total_Score', 'sim', 'appearance_sim', 'title_sim',
                                                           'price_sim']].copy()
                     comp_display['排名'] = range(1, len(comp_display) + 1)
                     comp_display['综合相似度'] = comp_display['sim'].apply(lambda x: f"{x * 100:.1f}%")
-                    comp_display['图片相似'] = comp_display['image_sim'].apply(
+                    comp_display['外观相似'] = comp_display['appearance_sim'].apply(
                         lambda x: f"{x * 100:.1f}%" if x is not None and not pd.isna(x) else "—")
                     comp_display['标题相似'] = comp_display['title_sim'].apply(lambda x: f"{x * 100:.1f}%")
                     comp_display['价格相似'] = comp_display['price_sim'].apply(lambda x: f"{x * 100:.1f}%")
-                    comp_display = comp_display.drop(columns=['sim', 'image_sim', 'title_sim', 'price_sim'])
+                    comp_display = comp_display.drop(columns=['sim', 'appearance_sim', 'title_sim', 'price_sim'])
                     comp_display = comp_display.rename(columns={
                         'title': '标题',
                         'brand': '品牌',
@@ -1996,8 +2044,9 @@ if uploaded_file is not None:
                         'Total_Score': '综合分'
                     })
                     comp_display = comp_display[['排名', 'asin', '标题', '品牌', '总价(€)', '单价(€)', '综合分',
-                                                 '综合相似度', '图片相似', '标题相似', '价格相似']]
+                                                 '综合相似度', '外观相似', '标题相似', '价格相似']]
                 else:
+                    # 回退到无外观的显示
                     comp_display = result['competitors'][['asin', 'title', 'brand', 'price_value', 'unit_price',
                                                           'Total_Score', 'sim', 'title_sim', 'price_sim']].copy()
                     comp_display['排名'] = range(1, len(comp_display) + 1)
@@ -2023,13 +2072,15 @@ if uploaded_file is not None:
                     total_n = len(result['all_ranked'])
                     with st.expander(f"📊 查看数据集全部 {total_n} 个产品的相似度排名"):
                         all_disp = result['all_ranked'][['asin', 'title', 'price_value', 'unit_price',
-                                                         'Total_Score', 'sim', 'image_sim']].copy()
+                                                         'Total_Score', 'sim', 'appearance_sim' if 'appearance_sim' in result['all_ranked'].columns else 'image_sim']].copy()
+                        # 统一列名
+                        sim_col = 'appearance_sim' if 'appearance_sim' in all_disp.columns else 'image_sim'
                         all_disp['排名'] = range(1, len(all_disp) + 1)
                         all_disp['综合相似度'] = all_disp['sim'].apply(lambda x: f"{x * 100:.1f}%")
-                        all_disp['图片相似度'] = all_disp['image_sim'].apply(
+                        all_disp['外观相似度'] = all_disp[sim_col].apply(
                             lambda x: f"{x * 100:.1f}%" if x is not None and not pd.isna(x) else "—")
                         all_disp = all_disp[['排名', 'asin', 'title', 'price_value', 'unit_price',
-                                             'Total_Score', '综合相似度', '图片相似度']]
+                                             'Total_Score', '综合相似度', '外观相似度']]
                         all_disp = all_disp.rename(columns={
                             'title': '标题',
                             'price_value': '总价(€)',
@@ -2048,9 +2099,10 @@ else:
     - 每产品分析 1 主图+2 详情+2 A+图
     - 100 产品约 5-10 分钟
     - 图片得分基于真实 CLIP 分析
-    **新品对比**
-    - 输入新品信息 + 上传主图
-    - 基于 CLIP 视觉向量找相似竞品
+    **新品对比（启用外观匹配）**
+    - 上传主图，系统会提取产品外观特征（去背景+DINOv2）
+    - 竞品匹配权重：标题 40% + 外观 40% + 价格 20%
+    - 如果 rembg 未安装，会自动回退到标题+价格匹配
     **增强功能**
     - 双语检测（英德同时识别）
     - 高频词参考（基于数据集）
