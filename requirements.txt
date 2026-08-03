@@ -19,6 +19,7 @@ pyarrow>=4.0.0           # 用于 parquet 缓存加速
 # 如果机器没有 NVIDIA 显卡，PyTorch 会自动安装 CPU 版本（约 500MB）
 # 如果报 CUDA 相关错误，可手动替换为：pip install torch --index-url https://download.pytorch.org/whl/cpu
 torch>=2.0.0
+torchvision>=0.15.0
 transformers>=4.36.0     # 同时支持 CLIP 和 DINOv2 模型
 
 # ---------- 🆕 去背景抠图（rembg 依赖链）----------
